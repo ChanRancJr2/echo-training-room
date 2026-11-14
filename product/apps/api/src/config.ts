@@ -8,6 +8,7 @@ const schema = z.object({
   REDIS_URL: z.url(),
   ENCRYPTION_MASTER_KEY: z.string().default(''),
   S3_ENDPOINT: z.url(),
+  S3_PUBLIC_ENDPOINT: z.url().optional(),
   S3_REGION: z.string().min(1),
   S3_BUCKET: z.string().min(3),
   S3_ACCESS_KEY: z.string().default(''),

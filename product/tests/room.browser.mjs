@@ -3,7 +3,13 @@ import { mkdir } from 'node:fs/promises';
 import { chromium } from 'playwright';
 
 const executablePath = process.env.BROWSER_EXECUTABLE ?? (process.platform === 'win32' ? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe' : undefined);
-const browser = await chromium.launch({ headless: true, args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'], ...(executablePath ? { executablePath } : {}) });
+const origin = process.env.ECHO_PRODUCT_ORIGIN ?? 'http://127.0.0.1:3100';
+const realAI = process.env.ECHO_REAL_AI_TEST === '1';
+const fakeAudio = process.env.ECHO_TEST_AUDIO;
+const browser = await chromium.launch({ headless: true, args: [
+  '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
+  ...(fakeAudio ? [`--use-file-for-fake-audio-capture=${fakeAudio}`] : []),
+], ...(executablePath ? { executablePath } : {}) });
 try {
   const hostContext = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, permissions: ['microphone'] });
   const guestContext = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, permissions: ['microphone'] });
@@ -15,7 +21,7 @@ try {
   const outsider = await outsiderContext.newPage();
   const errors = [];
   for (const page of [host, guest, observer, outsider]) page.on('pageerror', error => errors.push(error.message));
-  await host.goto('http://127.0.0.1:3100/');
+  await host.goto(origin);
   await host.getByText('匿名会话已建立').waitFor({ timeout: 10000 }).catch(async error => { console.error(await host.locator('body').innerText()); throw error; });
   await host.getByRole('button', { name: /双人同步练/ }).click();
   await host.getByRole('button', { name: '1 分钟' }).click();
@@ -25,17 +31,17 @@ try {
   assert.ok(created.inviteToken);
   assert.equal(created.state.durationSeconds, 60);
   await host.getByText('准备好，慢慢开始').waitFor();
-  await guest.goto(`http://127.0.0.1:3100/#invite=${created.inviteToken}`);
+  await guest.goto(`${origin}/#invite=${created.inviteToken}`);
   await guest.getByRole('button', { name: '加入', exact: true }).click();
   await guest.getByText('准备好，慢慢开始').waitFor();
   const observerInvitePromise = host.waitForResponse(response => response.url().endsWith('/invitations') && response.request().method() === 'POST' && response.status() < 500);
   await host.getByRole('button', { name: '生成观察者邀请' }).click();
   const observerInvite = await (await observerInvitePromise).json();
-  await observer.goto(`http://127.0.0.1:3100/#invite=${observerInvite.token}`);
+  await observer.goto(`${origin}/#invite=${observerInvite.token}`);
   await observer.getByRole('button', { name: '加入', exact: true }).click();
   await observer.getByText('你的座位：观察者').waitFor();
   assert.equal(await observer.getByRole('button', { name: '准备好了' }).count(), 0);
-  await outsider.goto(`http://127.0.0.1:3100/#invite=${observerInvite.token}`);
+  await outsider.goto(`${origin}/#invite=${observerInvite.token}`);
   await outsider.getByRole('button', { name: '加入', exact: true }).click();
   await outsider.getByText('邀请已使用或过期，请让表达者重新生成。').waitFor();
   await host.getByRole('button', { name: '准备好了' }).click();
@@ -92,12 +98,12 @@ try {
   const listenerRecording = await guest.evaluate(async id => await (await fetch(`/api/rooms/${id}`)).json(), created.state.id);
   assert.equal(listenerRecording.roundVersion, 7, 'listener recording starts its own server timer');
   assert.ok(Date.parse(listenerRecording.deadlineAt) - Date.now() > 50_000);
-  await guest.waitForTimeout(1100);
+  await guest.waitForTimeout(realAI ? 4500 : 1100);
   await guest.getByRole('button', { name: '结束录音' }).click();
   assert.equal(await guest.getByRole('button', { name: '确认上传' }).isDisabled(), true);
   await guest.getByLabel('我知晓复述录音提交后会被转写，用于本轮逐条对照。').check();
   await guest.getByRole('button', { name: '确认上传' }).click();
-  await host.getByRole('heading', { name: '先看差异' }).waitFor({ timeout: 15000 });
+  await host.getByRole('heading', { name: '先看差异' }).waitFor({ timeout: realAI ? 120000 : 15000 });
   const compared = await host.evaluate(async id => await (await fetch(`/api/rounds/${id}/comparison`)).json(), listenerRecording.roundId);
   assert.equal(compared.total, 2);
   assert.equal(compared.issues.length, 2);
@@ -105,11 +111,16 @@ try {
   await guest.getByRole('heading', { name: '先看差异' }).waitFor({ timeout: 8000 });
   assert.equal(await guest.getByRole('button', { name: '提交标注，邀请双方确认' }).count(), 0);
   await host.getByRole('button', { name: '提交标注，邀请双方确认' }).click();
-  await guest.getByRole('button', { name: '确认这一条' }).waitFor({ timeout: 8000 });
+  const issues = compared.issues.filter(item => !item.complete || !item.accurate);
+  assert.ok(issues.length > 0);
+  await guest.getByRole('button', { name: '确认这一条' }).first().waitFor({ timeout: 8000 });
   assert.equal(await host.getByRole('button', { name: '表达者提交，查看本轮报告' }).isDisabled(), true);
-  await guest.getByRole('button', { name: '确认这一条' }).click();
-  await host.getByText('表达者：待确认 · 复述者：已确认').waitFor({ timeout: 8000 });
-  await host.getByRole('button', { name: '确认这一条' }).click();
+  for (let index = 0; index < issues.length; index++) {
+    await guest.getByRole('button', { name: '确认这一条' }).nth(index).click();
+    await host.locator('.comparison-item').nth(index).getByText('表达者：待确认 · 复述者：已确认').waitFor({ timeout: 12000 });
+    await host.getByRole('button', { name: '确认这一条' }).nth(index).click();
+    await guest.locator('.comparison-item').nth(index).getByText('表达者：已确认 · 复述者：已确认').waitFor({ timeout: 12000 });
+  }
   await host.getByRole('button', { name: '表达者提交，查看本轮报告' }).click();
   await guest.getByRole('heading', { name: '本轮报告' }).waitFor({ timeout: 8000 });
   await host.reload();
@@ -127,11 +138,11 @@ try {
   assert.equal(nextRound.deadlineAt, null);
   await host.getByRole('button', { name: '开始录音' }).click();
   await host.getByRole('button', { name: '结束录音' }).waitFor();
-  await host.waitForTimeout(1100);
+  await host.waitForTimeout(realAI ? 5500 : 1100);
   await host.getByRole('button', { name: '结束录音' }).click();
   await host.getByRole('button', { name: '开启', exact: true }).click();
   await host.getByRole('button', { name: '确认上传' }).click();
-  await host.getByText('演示转写：这段文字仅用于本地联调。').waitFor({ timeout: 15000 });
+  await host.getByText(realAI ? /外婆/ : '演示转写：这段文字仅用于本地联调。').waitFor({ timeout: realAI ? 90000 : 15000 });
   const guestTranscriptStatus = await guest.evaluate(async roundId => (await fetch(`/api/rounds/${roundId}/speaker-transcript`)).status, nextRound.roundId);
   assert.equal(guestTranscriptStatus, 403);
   await host.getByRole('button', { name: '结束并关闭训练室' }).click();

@@ -9,17 +9,20 @@ export interface AudioStorage {
 
 export class S3AudioStorage implements AudioStorage {
   private readonly client: S3Client;
+  private readonly signer: S3Client;
   private readonly bucket: string;
-  constructor(input: { endpoint: string; region: string; bucket: string; accessKey: string; secretKey: string }) {
+  constructor(input: { endpoint: string; publicEndpoint?: string | undefined; region: string; bucket: string; accessKey: string; secretKey: string }) {
     this.bucket = input.bucket;
-    this.client = new S3Client({ endpoint: input.endpoint, region: input.region, forcePathStyle: true, requestChecksumCalculation: 'WHEN_REQUIRED',
-      credentials: { accessKeyId: input.accessKey, secretAccessKey: input.secretKey } });
+    const options = { region: input.region, forcePathStyle: true, requestChecksumCalculation: 'WHEN_REQUIRED' as const,
+      credentials: { accessKeyId: input.accessKey, secretAccessKey: input.secretKey } };
+    this.client = new S3Client({ ...options, endpoint: input.endpoint });
+    this.signer = input.publicEndpoint ? new S3Client({ ...options, endpoint: input.publicEndpoint }) : this.client;
   }
   async uploadUrl(key: string, mimeType: string): Promise<string> {
-    return getSignedUrl(this.client, new PutObjectCommand({ Bucket: this.bucket, Key: key, ContentType: mimeType }), { expiresIn: 300 });
+    return getSignedUrl(this.signer, new PutObjectCommand({ Bucket: this.bucket, Key: key, ContentType: mimeType }), { expiresIn: 300 });
   }
   async downloadUrl(key: string, expiresIn = 60): Promise<string> {
-    return getSignedUrl(this.client, new GetObjectCommand({ Bucket: this.bucket, Key: key }), { expiresIn });
+    return getSignedUrl(this.signer, new GetObjectCommand({ Bucket: this.bucket, Key: key }), { expiresIn });
   }
   async inspect(key: string): Promise<{ bytes: number; mimeType: string } | null> {
     try {

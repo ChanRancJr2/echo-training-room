@@ -29,7 +29,7 @@ const app = await createApp({
   sessions: new PgSessionStore(pool),
   rooms,
   rounds: new PgRoundStore(pool),
-  uploads: config.S3_ACCESS_KEY && config.S3_SECRET_KEY ? new PgUploadStore(pool, new S3AudioStorage({ endpoint: config.S3_ENDPOINT, region: config.S3_REGION, bucket: config.S3_BUCKET, accessKey: config.S3_ACCESS_KEY, secretKey: config.S3_SECRET_KEY })) : undefined,
+  uploads: config.S3_ACCESS_KEY && config.S3_SECRET_KEY ? new PgUploadStore(pool, new S3AudioStorage({ endpoint: config.S3_ENDPOINT, publicEndpoint: config.S3_PUBLIC_ENDPOINT, region: config.S3_REGION, bucket: config.S3_BUCKET, accessKey: config.S3_ACCESS_KEY, secretKey: config.S3_SECRET_KEY })) : undefined,
   points: cipher ? new PgPointStore(pool, cipher) : undefined,
   comparisons: cipher ? new PgComparisonStore(pool, cipher) : undefined,
   reviews: new PgReviewStore(pool),
@@ -43,7 +43,12 @@ const app = await createApp({
   },
 });
 
-if (process.env.WEB_ROOT) await app.register(fastifyStatic, { root: resolve(process.env.WEB_ROOT) });
+if (process.env.WEB_ROOT) await app.register(fastifyStatic, {
+  root: resolve(process.env.WEB_ROOT),
+  setHeaders(response, path) {
+    response.header('Cache-Control', path.endsWith('.html') ? 'no-cache' : 'public, max-age=31536000, immutable');
+  },
+});
 
 const close = async () => {
   clearInterval(sweeper);

@@ -15,7 +15,7 @@ if (config.AI_MODE === 'real' && !process.env.FFMPEG_PATH) throw new Error('FFMP
 const pool = new pg.Pool({ connectionString: config.DATABASE_URL, max: 10 });
 const cipher = new TextCipher(config.ENCRYPTION_MASTER_KEY);
 const comparisons = new PgComparisonStore(pool, cipher);
-const storage = new S3AudioStorage({ endpoint: config.S3_ENDPOINT, region: config.S3_REGION, bucket: config.S3_BUCKET,
+const storage = new S3AudioStorage({ endpoint: config.S3_ENDPOINT, publicEndpoint: config.S3_PUBLIC_ENDPOINT, region: config.S3_REGION, bucket: config.S3_BUCKET,
   accessKey: config.S3_ACCESS_KEY, secretKey: config.S3_SECRET_KEY });
 const provider = config.AI_MODE === 'real' ? new VolcAiProvider({ speechKey: config.SPEECH_API_KEY,
   resourceId: config.SPEECH_FILE_RESOURCE_ID, arkKey: config.ARK_API_KEY, modelId: config.ARK_MODEL_ID }) : null;
