@@ -23,6 +23,7 @@ try {
   for (const page of [host, guest, observer, outsider]) page.on('pageerror', error => errors.push(error.message));
   await host.goto(origin);
   await host.getByText('匿名会话已建立').waitFor({ timeout: 10000 }).catch(async error => { console.error(await host.locator('body').innerText()); throw error; });
+  assert.equal(await host.getByRole('link', { name: '训练大厅' }).count(), 0);
   await host.getByRole('button', { name: /双人同步练/ }).click();
   await host.getByRole('button', { name: '1 分钟' }).click();
   const createdPromise = host.waitForResponse(response => response.url().endsWith('/api/rooms') && response.request().method() === 'POST' && response.status() < 500);
@@ -31,6 +32,7 @@ try {
   assert.ok(created.inviteToken);
   assert.equal(created.state.durationSeconds, 60);
   await host.getByText('准备好，慢慢开始').waitFor();
+  assert.equal(await host.getByText('房间码').count(), 0);
   await guest.goto(`${origin}/#invite=${created.inviteToken}`);
   await guest.getByRole('button', { name: '加入', exact: true }).click();
   await guest.getByText('准备好，慢慢开始').waitFor();

@@ -1,4 +1,4 @@
-import { randomBytes, randomInt, randomUUID, scrypt, timingSafeEqual, createHash } from 'node:crypto';
+import { randomBytes, randomUUID, scrypt, timingSafeEqual, createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import type { Pool, PoolClient } from 'pg';
 import { applyRoundCommand, isSameDevice, newRound, type Mode, type Role, type Round } from '../../../packages/core/src/round.ts';
@@ -11,13 +11,9 @@ export class RoomError extends Error {
 const deny = (code: string, status = 409): never => { throw new RoomError(code, status); };
 const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
 const secret = () => randomBytes(32).toString('base64url');
-const inviteAlphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-export const inviteCodePattern = /^[A-HJ-NP-Z2-9]{6}$/;
-export const normalizeInviteCode = (code: string) => code.replace(/\s/g, '').toUpperCase();
 export const inviteErrorMessage = '邀请无效或已过期，请让发起人重新生成';
-type InviteCredential = { token: string; code?: never } | { token?: never; code: string };
 type TeenSettings = { nickname: string; role: 'speaker' | 'listener'; pin: string; consent: true };
-type Invitation = { id: string; room_id: string; role: 'listener' | 'observer'; password_hash: string | null; expires_at: Date; max_uses: number; use_count: number; revoked_at: Date | null; code: string | null };
+type Invitation = { id: string; room_id: string; role: 'listener' | 'observer'; password_hash: string | null; expires_at: Date; max_uses: number; use_count: number; revoked_at: Date | null };
 const derive = promisify(scrypt);
 const passwordHash = async (password: string) => {
   const salt = randomBytes(16);
@@ -115,7 +111,7 @@ export class PgRoomStore {
     return result.rows;
   }
 
-  async create(sessionId: string, mode: Mode, createKey: string, settings: { durationSeconds: number; retellStyle: 'auditory' | 'keywords'; topic: string; teen?: TeenSettings | undefined } = { durationSeconds: 30, retellStyle: 'auditory', topic: '家庭日常' }): Promise<{ state: RoomState; inviteToken: string | null; inviteCode: string | null }> {
+  async create(sessionId: string, mode: Mode, createKey: string, settings: { durationSeconds: number; retellStyle: 'auditory' | 'keywords'; topic: string; teen?: TeenSettings | undefined } = { durationSeconds: 30, retellStyle: 'auditory', topic: '家庭日常' }): Promise<{ state: RoomState; inviteToken: string | null }> {
     if (mode === 'teen' && !settings.teen) return deny('GUARDIAN_CONSENT_REQUIRED', 400);
     const pinHash = mode === 'teen' && settings.teen ? await passwordHash(settings.teen.pin) : null;
     return this.transaction(async db => {
@@ -124,7 +120,7 @@ export class PgRoomStore {
       if (existing) {
         if (existing.mode !== mode) return deny('CREATE_KEY_REUSED');
         if (existing.status === 'CLOSED') return deny('ROOM_CLOSED');
-        return { state: await this.state(existing.id, sessionId, db), inviteToken: null, inviteCode: null };
+        return { state: await this.state(existing.id, sessionId, db), inviteToken: null };
       }
       const roomId = randomUUID();
       await db.query('INSERT INTO rooms (id, mode, status, created_by, create_key, duration_seconds, retell_style, topic) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [roomId, mode, 'WAITING', sessionId, createKey, settings.durationSeconds, settings.retellStyle, settings.topic]);
@@ -132,7 +128,7 @@ export class PgRoomStore {
       if (settings.teen && pinHash) await db.query('INSERT INTO guardian_seats (room_id, session_id, nickname, child_role, pin_hash) VALUES ($1,$2,$3,$4,$5)',
         [roomId, sessionId, settings.teen.nickname, settings.teen.role, pinHash]);
       const invitation = !isSameDevice(mode) ? await this.insertInvitation(db, roomId, 'listener', 24 * 60, 1, null) : null;
-      return { state: await this.state(roomId, sessionId, db), inviteToken: invitation?.token ?? null, inviteCode: invitation?.code ?? null };
+      return { state: await this.state(roomId, sessionId, db), inviteToken: invitation?.token ?? null };
     });
   }
 
@@ -188,15 +184,10 @@ export class PgRoomStore {
   private async insertInvitation(db: PoolClient, roomId: string, role: 'listener' | 'observer', minutes: number, maxUses: number, password: string | null) {
     const token = secret();
     const hashedPassword = password ? await passwordHash(password) : null;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const code = Array.from({ length: 6 }, () => inviteAlphabet[randomInt(inviteAlphabet.length)]).join('');
-      const inserted = await db.query(`INSERT INTO invitations (id, room_id, token_hash, password_hash, expires_at, max_uses, role, code)
-        VALUES ($1,$2,$3,$4,now() + ($5::integer * interval '1 minute'),$6,$7,$8)
-        ON CONFLICT (code) WHERE code IS NOT NULL DO NOTHING`,
-      [randomUUID(), roomId, tokenHash(token), hashedPassword, minutes, maxUses, role, code]);
-      if (inserted.rowCount) return { token, code };
-    }
-    return deny('INVITE_GENERATION_UNAVAILABLE', 503);
+    await db.query(`INSERT INTO invitations (id, room_id, token_hash, password_hash, expires_at, max_uses, role)
+      VALUES ($1,$2,$3,$4,now() + ($5::integer * interval '1 minute'),$6,$7)`,
+    [randomUUID(), roomId, tokenHash(token), hashedPassword, minutes, maxUses, role]);
+    return { token };
   }
 
   async invite(roomId: string, sessionId: string, role: 'listener' | 'observer', minutes: number, maxUses: number, password: string | null) {
@@ -211,27 +202,24 @@ export class PgRoomStore {
     });
   }
 
-  async join(sessionId: string, credential: InviteCredential, password: string | null): Promise<RoomState> {
+  async join(sessionId: string, token: string, password: string | null): Promise<RoomState> {
     return this.transaction(async db => {
       const invitation = (await db.query<Pick<Invitation, 'id' | 'room_id'>>(
-        credential.token !== undefined ? 'SELECT id, room_id FROM invitations WHERE token_hash = $1' : 'SELECT id, room_id FROM invitations WHERE code = $1',
-        [credential.token !== undefined ? tokenHash(credential.token) : credential.code])).rows[0];
+        'SELECT id, room_id FROM invitations WHERE token_hash = $1', [tokenHash(token)])).rows[0];
       if (!invitation) return deny('INVITE_NOT_FOUND', 404);
       const room = (await db.query<{ status: string; mode: Mode }>('SELECT status, mode FROM rooms WHERE id = $1 FOR UPDATE', [invitation.room_id])).rows[0];
       const locked = (await db.query<Invitation>(
-        'SELECT id, room_id, role, password_hash, expires_at, max_uses, use_count, revoked_at, code FROM invitations WHERE id = $1 FOR UPDATE', [invitation.id])).rows[0];
+        'SELECT id, room_id, role, password_hash, expires_at, max_uses, use_count, revoked_at FROM invitations WHERE id = $1 FOR UPDATE', [invitation.id])).rows[0];
       if (!locked) return deny('INVITE_NOT_FOUND', 404);
-      const expiredCode = credential.token !== undefined ? 'INVITATION_EXPIRED' : 'INVITE_NOT_FOUND';
-      if (locked.revoked_at || room?.status === 'CLOSED') return deny(expiredCode, 410);
+      if (locked.revoked_at || room?.status === 'CLOSED') return deny('INVITATION_EXPIRED', 410);
       const existing = (await db.query<{ joined_invitation_id: string | null; role: Role }>(
         'SELECT joined_invitation_id, role FROM room_members WHERE room_id = $1 AND session_id = $2 AND active', [invitation.room_id, sessionId])).rows[0];
-      if (existing?.joined_invitation_id === locked.id ||
-          (existing?.joined_invitation_id === null && locked.code === null && existing.role === locked.role)) {
+      if (existing?.joined_invitation_id === locked.id || (existing?.joined_invitation_id === null && existing.role === locked.role)) {
         return this.state(invitation.room_id, sessionId, db);
       }
-      if (locked.expires_at.getTime() <= Date.now() || locked.use_count >= locked.max_uses) return deny(expiredCode, 410);
+      if (locked.expires_at.getTime() <= Date.now() || locked.use_count >= locked.max_uses) return deny('INVITATION_EXPIRED', 410);
       if (locked.password_hash && (!password || !await matchesPassword(password, locked.password_hash))) {
-        return deny('INVITE_NOT_FOUND', credential.token !== undefined ? 403 : 404);
+        return deny('INVITE_NOT_FOUND', 403);
       }
       const asyncRound = room?.mode === 'async' && room.status === 'ACTIVE' && locked.role === 'listener' ? (await db.query<{ id: string; snapshot: Round }>(
         `SELECT id, snapshot FROM rounds WHERE room_id=$1 AND stage IN ('TASK','SPEAKER_RECORDING','KEYPOINT_CONFIRM','ASYNC_PENDING') FOR UPDATE`, [invitation.room_id])).rows[0] : undefined;

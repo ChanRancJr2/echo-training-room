@@ -7,6 +7,7 @@ const base = process.argv[2] ?? 'http://127.0.0.1:3101';
 const origin = process.argv[3] ?? new URL(base).origin;
 const mode = process.argv[4] === 'async' ? 'async' : 'sync';
 const audio = await readFile(new URL('./speaker-sample.mp3', import.meta.url));
+const listenerWav = process.env.ECHO_SMOKE_LISTENER_WAV ? await readFile(process.env.ECHO_SMOKE_LISTENER_WAV) : null;
 async function request(path, cookie, data) {
   const response = await fetch(new URL(path, base), {
     headers: { ...(cookie ? { cookie } : {}), ...(data ? { origin, 'content-type': 'application/json' } : {}) },
@@ -30,13 +31,15 @@ try {
   const started = await post(`${room}/start`, host);
   const round = `/api/rounds/${started.roundId}`;
   async function upload(cookie, kind, version, transcribe = false) {
-    const target = await post(`${round}/uploads`, cookie, { kind, mimeType: 'audio/mpeg', byteSize: audio.length, idempotencyKey: randomUUID() });
+    const bytes = kind === 'listener' && listenerWav ? listenerWav : audio;
+    const mimeType = bytes === listenerWav ? 'audio/wav' : 'audio/mpeg';
+    const target = await post(`${round}/uploads`, cookie, { kind, mimeType, byteSize: bytes.length, idempotencyKey: randomUUID() });
     const preflight = await fetch(target.uploadUrl, { method: 'OPTIONS', headers: {
       origin, 'access-control-request-method': 'PUT', 'access-control-request-headers': 'content-type',
     }, signal: AbortSignal.timeout(12000) });
     assert.ok(preflight.ok, `upload preflight HTTP ${preflight.status}`);
     assert.ok(['*', origin].includes(preflight.headers.get('access-control-allow-origin')), 'upload CORS origin');
-    const put = await fetch(target.uploadUrl, { method: 'PUT', headers: { origin, 'content-type': 'audio/mpeg' }, body: audio, signal: AbortSignal.timeout(12000) });
+    const put = await fetch(target.uploadUrl, { method: 'PUT', headers: { origin, 'content-type': mimeType }, body: bytes, signal: AbortSignal.timeout(12000) });
     assert.ok(put.ok, `storage PUT HTTP ${put.status}`);
     return post(`${round}/uploads/${target.audioId}/commit`, cookie, { expectedVersion: version, transcribe, consentToTranscribe: kind === 'listener' });
   }

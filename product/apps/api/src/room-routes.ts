@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { findSession, type SessionStore } from './sessions.ts';
-import { inviteCodePattern, inviteErrorMessage, normalizeInviteCode, PgRoomStore, RoomError } from './rooms.ts';
+import { inviteErrorMessage, PgRoomStore, RoomError } from './rooms.ts';
 import { PgRoundStore, roundErrorResponse } from './rounds.ts';
 import type { PgUploadStore } from './uploads.ts';
 import type { PgPointStore } from './points.ts';
@@ -16,10 +16,7 @@ const createBody = z.object({ mode, createKey: z.string().min(8).max(100), durat
   .refine(body => (body.mode === 'teen') === Boolean(body.teen));
 const inviteBody = z.object({ role: z.enum(['listener', 'observer']), minutes: z.number().int().min(5).max(10080), maxUses: z.number().int().min(1).max(10), password: z.string().min(6).max(100).nullable().default(null) }).strict();
 const password = z.string().max(100).nullable().default(null);
-const joinBody = z.union([
-  z.object({ token: z.string().regex(/^[A-Za-z0-9_-]{43}$/), password }).strict(),
-  z.object({ code: z.string().max(64).transform(normalizeInviteCode).pipe(z.string().regex(inviteCodePattern)), password }).strict(),
-]);
+const joinBody = z.object({ token: z.string().regex(/^[A-Za-z0-9_-]{43}$/), password }).strict();
 const readyBody = z.object({ ready: z.boolean() }).strict();
 
 export function registerRoomRoutes(app: FastifyInstance, rooms: PgRoomStore, sessions: SessionStore, now: () => Date, rounds?: PgRoundStore, uploads?: PgUploadStore, points?: PgPointStore, comparisons?: PgComparisonStore, reviews?: PgReviewStore, deletions?: PgDeletionStore) {
@@ -116,23 +113,11 @@ export function registerRoomRoutes(app: FastifyInstance, rooms: PgRoomStore, ses
     const invitation = await rooms.invite(roomId.data, session.id, body.data.role, body.data.minutes, body.data.maxUses, body.data.password);
     return reply.code(201).send({ ...invitation, role: body.data.role, minutes: body.data.minutes, maxUses: body.data.maxUses });
   });
-  const limitCode = app.createRateLimit({
-    max: 5, timeWindow: '10 minutes',
-    keyGenerator: request => {
-      const parsed = joinBody.safeParse(request.body);
-      return `invite-code:${request.ip}:${parsed.success && 'code' in parsed.data ? parsed.data.code : ''}`;
-    },
-  });
   app.post('/api/rooms/join', { config: { rateLimit: { max: 15, timeWindow: '1 minute' } } }, async (request, reply) => {
     const parsed = joinBody.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'INVALID_INPUT', message: inviteErrorMessage });
     const session = await authenticated(request.headers.cookie);
-    if ('code' in parsed.data) {
-      const limited = await limitCode(request);
-      if (!limited.isAllowed && limited.isExceeded) return reply.header('Retry-After', limited.ttlInSeconds).code(429).send({ error: 'RATE_LIMITED' });
-      return rooms.join(session.id, { code: parsed.data.code }, parsed.data.password);
-    }
-    return rooms.join(session.id, { token: parsed.data.token }, parsed.data.password);
+    return rooms.join(session.id, parsed.data.token, parsed.data.password);
   });
   app.post('/api/rooms/:roomId/ready', async (request, reply) => {
     const roomId = uuid.safeParse((request.params as { roomId: string }).roomId);

@@ -1,6 +1,5 @@
 import { Component, useEffect, useState, type ReactNode } from 'react';
 import { RoomFlow } from './RoomFlow.tsx';
-import { Lobby } from './Lobby.tsx';
 import { History, type RecordSummary } from './History.tsx';
 import { modes } from './flow.ts';
 import { boundedFetch as fetch } from './client.ts';
@@ -37,13 +36,10 @@ function TrainingApp() {
   const [records, setRecords] = useState<RecordSummary[]>([]);
   const [historyStatus, setHistoryStatus] = useState('');
   const [inRoom, setInRoom] = useState(() => Boolean(new URLSearchParams(location.search).get('room') || new URLSearchParams(location.hash.slice(1)).get('invite')));
-  const [lobby, setLobby] = useState(() => location.hash === '#/lobby' && !inRoom);
-  const [fromLobby, setFromLobby] = useState(() => lobby || history.state?.fromLobby === true);
   useEffect(() => {
     const update = () => {
       const invitation = new URLSearchParams(location.hash.slice(1)).has('invite');
       const hasRoom = new URLSearchParams(location.search).has('room');
-      setLobby(location.hash === '#/lobby' && !hasRoom);
       if (invitation && !hasRoom) { setSelected(null); setHistoryOpen(false); setInRoom(true); }
     };
     window.addEventListener('hashchange', update);
@@ -56,7 +52,7 @@ function TrainingApp() {
       if (!live) return;
       if (value.handoffRoomId) {
         history.replaceState({}, '', `?room=${encodeURIComponent(value.handoffRoomId)}`);
-        setLobby(false); setInRoom(true);
+        setInRoom(true);
       }
       setSession(value);
     }).catch(reason => { if (live) setError(reason instanceof Error ? reason.message : '网络异常'); });
@@ -70,40 +66,25 @@ function TrainingApp() {
       setRecords(await response.json()); setHistoryStatus('');
     } catch { setHistoryStatus('复盘暂时无法读取，请返回后重试。'); }
   };
-  const returnToLobby = () => {
-    setSelected(null);
-    history.replaceState({}, '', location.pathname + '#/lobby');
-    setLobby(true);
-  };
   const onRoomChange = (active: boolean) => {
     setInRoom(active);
     if (!active) setSelected(null);
-    if (active && fromLobby) queueMicrotask(() => history.replaceState({ fromLobby: true }, ''));
-    if (!active && fromLobby) returnToLobby();
   };
   return <div className="shell">
     <header className="top"><span className="mark">↗</span><strong>回声训练室</strong><span className="status">动态 Demo 版</span></header>
     <main>
       {!window.isSecureContext && <p role="alert" className="notice">请通过 HTTPS 打开训练室，才能使用麦克风。</p>}
-      {!selected && !inRoom && !historyOpen && !lobby && <><h1>让“听懂了”，<br /><em>变成真的听懂。</em></h1>
+      {!selected && !inRoom && !historyOpen && <><h1>让“听懂了”，<br /><em>变成真的听懂。</em></h1>
       <p className="lead">先复述，不评价。逐条确认说出去的和听到的差在哪里。</p></>}
       {error ? <div className="notice" role="alert">{error}<button type="button" onClick={() => location.reload()}>重试</button></div> :
         <div className="notice">{session ? `匿名会话已建立 · ${session.nickname}` : '正在建立安全会话…'}</div>}
-      {session && lobby && !historyOpen && <Lobby
-        onCreate={() => { setFromLobby(true); history.replaceState({}, '', location.pathname); setLobby(false); }}
-        onHistory={() => void openHistory()}
-        onJoin={id => {
-          history.replaceState({ fromLobby: true }, '', `?room=${encodeURIComponent(id)}`);
-          setFromLobby(true); setInRoom(true); setLobby(false);
-        }} />}
-      {!selected && !inRoom && !historyOpen && !lobby && <><h2>选择练法</h2>
+      {!selected && !inRoom && !historyOpen && <><h2>选择练法</h2>
       <div className="modes">{modes.map(([key, title, description]) => <button type="button" key={key} disabled={!session} onClick={() => { setSelected(key); window.scrollTo(0, 0); }}>
         <strong>{title}</strong><small>{description}</small>
-      </button>)}</div><button className="secondary" disabled={!session} onClick={() => void openHistory()}>复盘记录</button>
-      <a href="#/lobby" onClick={() => setFromLobby(true)}>训练大厅</a></>}
+      </button>)}</div><button className="secondary" disabled={!session} onClick={() => void openHistory()}>复盘记录</button></>}
       {historyOpen && <History records={records} status={historyStatus} onBack={() => setHistoryOpen(false)} onDeleted={openHistory} />}
       {selected && !inRoom && <button className="text-button" onClick={() => setSelected(null)}>← 返回首页</button>}
-      {session && !lobby && !historyOpen && <RoomFlow mode={selected} onRoomChange={onRoomChange} />}
+      {session && !historyOpen && <RoomFlow mode={selected} onRoomChange={onRoomChange} />}
     </main>
   </div>;
 }

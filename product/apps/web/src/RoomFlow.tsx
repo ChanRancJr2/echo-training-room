@@ -16,6 +16,7 @@ const messages: Record<string, string> = {
   STALE_VERSION: '房间状态已更新，请确认后重试。',
   INVITATION_EXPIRED: '邀请已使用或过期，请让表达者重新生成。',
   INVITATION_PASSWORD: '邀请密码不正确。',
+  INVITE_NOT_FOUND: '邀请链接无效，请让表达者重新分享。',
   ROOM_NOT_JOINABLE: '本轮已开始，暂时无法加入。',
   ROOM_CLOSED: '训练室已关闭。',
   PLAYERS_NOT_READY: '请等表达者和复述者都准备好。',
@@ -56,7 +57,6 @@ export function RoomFlow({ mode, onRoomChange }: { mode: string | null; onRoomCh
   const [invitePassword, setInvitePassword] = useState('');
   const [inviteOnce, setInviteOnce] = useState(true);
   const [shareUrl, setShareUrl] = useState('');
-  const [shareCode, setShareCode] = useState('');
   const running = useRef(false);
   const createKey = useRef<string | null>(null);
   const player = useRef<HTMLAudioElement | null>(null);
@@ -130,11 +130,11 @@ export function RoomFlow({ mode, onRoomChange }: { mode: string | null; onRoomCh
   const create = () => void run(async () => {
     if (!mode) return;
     createKey.current ??= newRequestId();
-    const result = await call<{ state: Room; inviteToken: string | null; inviteCode: string | null }>('/api/rooms', { mode, createKey: createKey.current, durationSeconds, retellStyle, topic: topic === '自定义填写' ? customTopic.trim() : topic,
+    const result = await call<{ state: Room; inviteToken: string | null }>('/api/rooms', { mode, createKey: createKey.current, durationSeconds, retellStyle, topic: topic === '自定义填写' ? customTopic.trim() : topic,
       ...(mode === 'teen' ? { teen: { nickname: teenNickname.trim(), pin: guardianPin, role: teenRole, consent: guardianConsent } } : {}) });
     createKey.current = null;
     setGuardianPin('');
-    setRoom(result.state); setInvite(result.inviteToken); setShareUrl(''); setShareCode(result.inviteCode ?? ''); onRoomChange(true); history.replaceState({}, '', `?room=${result.state.id}`);
+    setRoom(result.state); setInvite(result.inviteToken); setShareUrl(''); onRoomChange(true); history.replaceState({}, '', `?room=${result.state.id}`);
   });
   const join = () => void run(async () => {
     const state = await call<Room>('/api/rooms/join', { token, password: password || null });
@@ -164,13 +164,12 @@ export function RoomFlow({ mode, onRoomChange }: { mode: string | null; onRoomCh
       throw cause;
     }
   };
-  const leave = () => void run(async () => { if (room) { await call(`/api/rooms/${room.id}/leave`, {}); setRoom(null); setInvite(null); setShareUrl(''); setShareCode(''); setInviteRole('listener'); history.replaceState({}, '', location.pathname); onRoomChange(false); } });
+  const leave = () => void run(async () => { if (room) { await call(`/api/rooms/${room.id}/leave`, {}); setRoom(null); setInvite(null); setShareUrl(''); setInviteRole('listener'); history.replaceState({}, '', location.pathname); onRoomChange(false); } });
   const makeInvite = (role: 'listener' | 'observer') => void run(async () => {
     if (!room) return;
-    const { token, code } = await call<{ token: string; code: string }>(`/api/rooms/${room.id}/invitations`, { role, minutes: inviteMinutes, maxUses: inviteOnce ? 1 : 10, password: invitePassword || null });
+    const { token } = await call<{ token: string }>(`/api/rooms/${room.id}/invitations`, { role, minutes: inviteMinutes, maxUses: inviteOnce ? 1 : 10, password: invitePassword || null });
     setInvite(token);
     setShareUrl(`${location.origin}/#invite=${token}`);
-    setShareCode(code);
   });
   const share = () => void run(async () => {
     if (!invite) return;
@@ -226,8 +225,8 @@ export function RoomFlow({ mode, onRoomChange }: { mode: string | null; onRoomCh
     {room && !guardianPanel && room.you.role === 'speaker' && !sameDevice && (waiting || pendingInvite) && <section className="card invite-card">
         <h2>邀请搭档</h2>
         <div className="option-grid" aria-label="邀请角色">
-          <button className={inviteRole === 'listener' ? 'chosen' : ''} onClick={() => { setInviteRole('listener'); setInvite(null); setShareUrl(''); setShareCode(''); }}>复述者</button>
-          {room.status === 'WAITING' && <button className={inviteRole === 'observer' ? 'chosen' : ''} onClick={() => { setInviteRole('observer'); setInvite(null); setShareUrl(''); setShareCode(''); }}>观察者</button>}
+          <button className={inviteRole === 'listener' ? 'chosen' : ''} onClick={() => { if (inviteRole !== 'listener') { setInviteRole('listener'); setInvite(null); setShareUrl(''); } }}>复述者</button>
+          {room.status === 'WAITING' && <button className={inviteRole === 'observer' ? 'chosen' : ''} onClick={() => { if (inviteRole !== 'observer') { setInviteRole('observer'); setInvite(null); setShareUrl(''); } }}>观察者</button>}
         </div>
         <label>有效期 <select value={inviteMinutes} onChange={event => setInviteMinutes(Number(event.target.value))}>
           <option value={60}>1 小时</option><option value={1440}>24 小时</option><option value={10080}>7 天</option>
@@ -237,7 +236,6 @@ export function RoomFlow({ mode, onRoomChange }: { mode: string | null; onRoomCh
         <button className="secondary" disabled={busy || (invitePassword.length > 0 && invitePassword.length < 6)} onClick={() => makeInvite(room.status === 'ACTIVE' ? 'listener' : inviteRole)}>生成{room.status === 'ACTIVE' ? '复述者' : names[inviteRole]}邀请</button>
         <button className="secondary" disabled={busy || !invite} onClick={share}>分享该链接</button>
         {shareUrl && <input aria-label="邀请链接" readOnly value={shareUrl} onFocus={event => event.currentTarget.select()} />}
-        {shareCode && <p>房间码 <strong>{shareCode}</strong></p>}
     </section>}
     {guardianPanel}
     {room && needsChild && !guardianPanel && <div className="card"><h2>交棒给孩子</h2><p>{teen.nickname} · {names[teen.role]}</p>
@@ -284,7 +282,7 @@ export function RoomFlow({ mode, onRoomChange }: { mode: string | null; onRoomCh
         {room.stage === 'ARCHIVED' && room.mode === 'sync' && room.you.role === 'speaker' && room.members.some(member => member.role === 'listener') &&
           <button className="secondary" disabled={busy} onClick={() => void run(async () => {
             setRoom(await call<Room>(`/api/rooms/${room.id}/swap-seats`, { expectedVersion: room.version }));
-            setInvite(null); setShareUrl(''); setShareCode(''); setReportDismissed(room.roundId);
+            setInvite(null); setShareUrl(''); setReportDismissed(room.roundId);
           })}>交换表达者与复述者</button>}
       </div>
     </>}

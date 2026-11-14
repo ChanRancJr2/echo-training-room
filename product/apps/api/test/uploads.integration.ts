@@ -22,7 +22,7 @@ class FakeStorage implements AudioStorage {
   async uploadUrl(key: string) { return `https://storage.test/${key}`; }
   async downloadUrl(key: string) { return `https://storage.test/${key}?signed=1`; }
   async inspect(key: string) { return this.files.get(key) ?? null; }
-  async prefix(key: string) { return this.files.get(key)?.invalid ? Buffer.from('not audio') : Buffer.from('1a45dfa3', 'hex'); }
+  async prefix(key: string) { return this.files.get(key)?.invalid ? Buffer.from('not audio') : Buffer.from('1a45dfa3000000000000000000000000', 'hex'); }
 }
 
 test('speaker and listener uploads are verified, role-bound and idempotent across API instances', async () => {
@@ -91,6 +91,7 @@ test('speaker and listener uploads are verified, role-bound and idempotent acros
     storage.files.set(new URL(listenerPending.uploadUrl).pathname.slice(1), { bytes: 100, mimeType: 'audio/webm' });
     assert.equal((await post(b, `/api/rounds/${roundId}/uploads/${listenerPending.audioId}/commit`, guestCookie, { expectedVersion: 6, consentToTranscribe: true })).json().error, 'STALE_AUDIO');
     const guestUpload = (await post(b, `/api/rounds/${roundId}/uploads`, guestCookie, { kind: 'listener', mimeType: 'audio/webm', byteSize: 1024, idempotencyKey: crypto.randomUUID() })).json();
+    assert.equal((await post(b, `/api/rounds/${roundId}/uploads`, guestCookie, { kind: 'listener', mimeType: 'audio/webm', byteSize: 5, idempotencyKey: crypto.randomUUID() })).json().error, 'INVALID_AUDIO');
     storage.files.set(new URL(guestUpload.uploadUrl).pathname.slice(1), { bytes: 1024, mimeType: 'audio/webm' });
     const guestCommitUrl = `/api/rounds/${roundId}/uploads/${guestUpload.audioId}/commit`;
     assert.equal((await post(b, guestCommitUrl, guestCookie, { expectedVersion: 6 })).json().error, 'CONSENT_REQUIRED');

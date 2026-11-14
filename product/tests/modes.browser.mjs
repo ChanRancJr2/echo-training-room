@@ -15,6 +15,27 @@ async function mobile() {
   return page;
 }
 
+async function simulateBrokenMediaRecorder(page) {
+  await page.addInitScript(() => {
+    window.MediaRecorder = class extends EventTarget {
+      static isTypeSupported(type) { return type === 'audio/webm'; }
+      mimeType = 'audio/webm';
+      state = 'inactive';
+      start(...args) { if (args.length) throw new Error('Expected stop-time encoding'); this.state = 'recording'; }
+      pause() { this.state = 'paused'; }
+      resume() { this.state = 'recording'; }
+      stop() {
+        this.state = 'inactive';
+        queueMicrotask(() => {
+          this.ondataavailable?.({ data: new Blob([new Uint8Array(5)], { type: 'audio/webm' }) });
+          this.onstop?.();
+        });
+      }
+    };
+  });
+  await page.reload();
+}
+
 const click = (page, name) => page.getByRole('button', { name, exact: true }).click();
 const room = page => page.evaluate(async () => (await fetch(`/api/rooms/${new URLSearchParams(location.search).get('room')}`)).json());
 const status = (page, path) => page.evaluate(async url => (await fetch(url)).status, path);
@@ -91,7 +112,24 @@ try {
   await click(asyncGuest, '打开留言，开始复述');
   await click(asyncGuest, '查看关键词提示');
   await asyncGuest.getByText('重点 · 午饭要看外婆…').waitFor();
-  await record(asyncGuest, true);
+  await simulateBrokenMediaRecorder(asyncGuest);
+  await click(asyncGuest, '开始录音');
+  await asyncGuest.getByRole('button', { name: '暂停录音' }).waitFor();
+  await asyncGuest.getByText('00:30', { exact: true }).waitFor({ timeout: 35_000 });
+  await asyncGuest.getByLabel('我知晓复述录音提交后会被转写，用于本轮逐条对照。').check();
+  const preview = asyncGuest.locator('.recorder audio');
+  await preview.evaluate(audio => new Promise((resolve, reject) => {
+    if (audio.readyState >= 1) return resolve();
+    if (audio.error) return reject(audio.error.message);
+    audio.addEventListener('loadedmetadata', resolve, { once: true });
+    audio.addEventListener('error', () => reject(audio.error.message), { once: true });
+  }));
+  assert.ok(await preview.evaluate(audio => audio.duration) >= 28, 'playable fallback preserves the full recording');
+  const wavUpload = asyncGuest.waitForRequest(request => request.method() === 'POST' && request.url().endsWith('/uploads'));
+  await click(asyncGuest, '确认上传');
+  const fallback = (await wavUpload).postDataJSON();
+  assert.equal(fallback.mimeType, 'audio/wav');
+  assert.ok(fallback.byteSize >= 896_044);
   await asyncHost.getByRole('heading', { name: '先看差异' }).waitFor();
   await click(asyncHost, '请表达者逐条标注');
   await click(asyncHost, '提交标注，邀请双方确认');

@@ -12,7 +12,6 @@
     "test:integration": "node --experimental-strip-types --test apps/api/test/*.integration.ts",
     "test:browser": "node tests/room.browser.mjs",
     "test:e2e": "node scripts/test-e2e.mjs",
-    "test:lobby": "node tests/lobby.browser.mjs",
     "test": "npm run typecheck && npm run test:core && npm run test:api",
     "dev:api": "node --experimental-strip-types --watch apps/api/src/main.ts",
     "dev:worker": "node --experimental-strip-types --watch apps/api/src/worker.ts",

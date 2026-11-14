@@ -1,25 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { applyRoundCommand, isSameDevice, type Member, type Round } from '../../../packages/core/src/round.ts';
+import { audioMimeTypes, detectAudioMime, maxAudioBytes } from '../../../packages/core/src/audio.ts';
 import type { AudioStorage } from './audio-storage.ts';
 import { RoomError } from './rooms.ts';
 import { lockActiveRoundRoom } from './round-lock.ts';
 
 export type AudioKind = 'speaker' | 'listener';
 type Asset = { id: string; round_id: string; member_id: string; kind: AudioKind; object_key: string; mime_type: string; byte_size: string; state: string; idempotency_key: string; round_version: string };
-const allowedMime = new Set(['audio/webm', 'audio/mp4', 'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/aac']);
+const allowedMime = new Set<string>(audioMimeTypes);
 const demand = (code: string, status = 409): never => { throw new RoomError(code, status); };
 export function matchesAudioHeader(mime: string, bytes: Buffer): boolean {
-  const starts = (signature: string) => bytes.subarray(0, signature.length / 2).toString('hex') === signature;
-  switch (mime) {
-    case 'audio/webm': return starts('1a45dfa3');
-    case 'audio/ogg': return starts('4f676753');
-    case 'audio/mp4': return bytes.toString('ascii', 4, 8) === 'ftyp';
-    case 'audio/wav': return starts('52494646') && bytes.toString('ascii', 8, 12) === 'WAVE';
-    case 'audio/mpeg': return starts('494433') || (bytes[0] === 255 && ((bytes[1] ?? 0) & 224) === 224);
-    case 'audio/aac': return bytes[0] === 255 && ((bytes[1] ?? 0) & 246) === 240;
-    default: return false;
-  }
+  return detectAudioMime(bytes) === mime;
 }
 
 export class PgUploadStore {
@@ -48,7 +40,7 @@ export class PgUploadStore {
   }
 
   async request(roundId: string, sessionId: string, kind: AudioKind, mimeType: string, byteSize: number, idempotencyKey: string): Promise<{ audioId: string; status: 'PENDING' | 'COMMITTED'; uploadUrl: string | null }> {
-    if (!allowedMime.has(mimeType) || !Number.isSafeInteger(byteSize) || byteSize < 1 || byteSize > 15_000_000) return demand('INVALID_AUDIO', 400);
+    if (!allowedMime.has(mimeType) || !Number.isSafeInteger(byteSize) || byteSize < 64 || byteSize > maxAudioBytes) return demand('INVALID_AUDIO', 400);
     const asset = await this.transaction(async db => {
       await lockActiveRoundRoom(db, roundId);
       const row = (await db.query<{ snapshot: Round }>("SELECT snapshot FROM rounds WHERE id = $1 AND stage NOT IN ('CANCELLED', 'ARCHIVED') FOR UPDATE", [roundId])).rows[0];
@@ -78,7 +70,7 @@ export class PgUploadStore {
     if (asset.state !== 'COMMITTED') {
       const object = await this.storage.inspect(asset.object_key);
       if (!object || object.bytes !== Number(asset.byte_size) || object.mimeType !== asset.mime_type) return demand('UPLOAD_NOT_VERIFIED');
-      if (!matchesAudioHeader(asset.mime_type, await this.storage.prefix(asset.object_key))) {
+      if (Number(asset.byte_size) < 64 || !matchesAudioHeader(asset.mime_type, await this.storage.prefix(asset.object_key))) {
         return demand('UNSUPPORTED_AUDIO', 400);
       }
     }
