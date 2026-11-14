@@ -13,7 +13,8 @@ export function AudioPlayer({ roundId, audioId, audioRef: element, label = '表�
     if (!audio || loading.current || blocked) return;
     if (state === 'playing') { audio.pause(); setState('paused'); return; }
     if (state === 'paused' && audio.src) {
-      try { await audio.play(); setState('playing'); } catch { setError('请点击下方播放器的播放键。'); }
+      try { await audio.play(); setState('playing'); setError(''); }
+      catch { audio.removeAttribute('src'); setState('new'); setError('暂时无法播放，请重新点击播放。'); }
       return;
     }
     setError('');
@@ -37,7 +38,7 @@ export function AudioPlayer({ roundId, audioId, audioRef: element, label = '表�
       audio.src = result.url;
       audio.load();
       try { await audio.play(); setState('playing'); }
-      catch { setError('请点击下方播放器的播放键。'); }
+      catch { setState('paused'); setError('请再点一次「继续播放」。'); }
     } catch (cause) { setError(cause instanceof Error ? cause.message : '播放失败'); }
     finally { loading.current = false; setPending(false); }
   }
