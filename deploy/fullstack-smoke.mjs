@@ -5,6 +5,7 @@ import { setTimeout as wait } from 'node:timers/promises';
 
 const base = process.argv[2] ?? 'http://127.0.0.1:3101';
 const origin = process.argv[3] ?? new URL(base).origin;
+const mode = process.argv[4] === 'async' ? 'async' : 'sync';
 const audio = await readFile(new URL('./speaker-sample.mp3', import.meta.url));
 async function request(path, cookie, data) {
   const response = await fetch(new URL(path, base), {
@@ -20,7 +21,7 @@ const post = async (path, cookie, data = {}) => (await request(path, cookie, dat
 const get = async (path, cookie) => (await request(path, cookie)).result;
 const host = (await request('/api/sessions/anonymous', null, { nickname: '上线验证表达者' })).cookie;
 const guest = (await request('/api/sessions/anonymous', null, { nickname: '上线验证复述者' })).cookie;
-const created = await post('/api/rooms', host, { mode: 'sync', createKey: randomUUID() });
+const created = await post('/api/rooms', host, { mode, createKey: randomUUID() });
 const room = `/api/rooms/${created.state.id}`;
 try {
   await post('/api/rooms/join', guest, { token: created.inviteToken });
@@ -52,12 +53,19 @@ try {
   }
   assert.equal(transcript?.status, 'ready', 'real speaker transcription completed');
   assert.match(transcript.text, /外婆/);
+  if (process.env.ECHO_EXPECT_CANDIDATES === '1') assert.ok(transcript.candidates?.length > 0, 'Ark extracted candidate points');
   console.log('Real speaker ASR and audio playback passed');
   const points = await post(`${round}/points/confirm`, host, { expectedVersion: speaker.round.version, points: [
     { category: '事件', text: '周六先去看望外婆' },
     { category: '需求', text: '周日必须去机场接同学' },
   ] });
-  const listening = await post(`${round}/restart-recording`, guest, { expectedVersion: points.round.version, kind: 'listener' });
+  let readyToRetell = points.round;
+  if (mode === 'async') {
+    assert.equal(readyToRetell.stage, 'ASYNC_PENDING');
+    readyToRetell = await post(`${round}/open-message`, guest, { expectedVersion: readyToRetell.version });
+    assert.equal(readyToRetell.stage, 'LISTENER_RETELL');
+  }
+  const listening = await post(`${round}/restart-recording`, guest, { expectedVersion: readyToRetell.version, kind: 'listener' });
   await upload(guest, 'listener', listening.version);
   let state;
   for (let i = 0; i < 55; i++) {

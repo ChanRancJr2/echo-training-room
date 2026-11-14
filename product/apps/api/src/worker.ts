@@ -4,6 +4,7 @@ import { Queue, Worker } from 'bullmq';
 import { readConfig } from './config.ts';
 import { TextCipher } from './crypto.ts';
 import { PgComparisonStore } from './comparisons.ts';
+import { PgRoomStore } from './rooms.ts';
 import { S3AudioStorage } from './audio-storage.ts';
 import { toMp3 } from './transcode.ts';
 import { VolcAiProvider, type ComparedPoint } from './ai-provider.ts';
@@ -15,6 +16,7 @@ if (config.AI_MODE === 'real' && !process.env.FFMPEG_PATH) throw new Error('FFMP
 const pool = new pg.Pool({ connectionString: config.DATABASE_URL, max: 10 });
 const cipher = new TextCipher(config.ENCRYPTION_MASTER_KEY);
 const comparisons = new PgComparisonStore(pool, cipher);
+const rooms = new PgRoomStore(pool);
 const storage = new S3AudioStorage({ endpoint: config.S3_ENDPOINT, publicEndpoint: config.S3_PUBLIC_ENDPOINT, region: config.S3_REGION, bucket: config.S3_BUCKET,
   accessKey: config.S3_ACCESS_KEY, secretKey: config.S3_SECRET_KEY });
 const provider = config.AI_MODE === 'real' ? new VolcAiProvider({ speechKey: config.SPEECH_API_KEY,
@@ -41,7 +43,11 @@ const worker = new Worker<AudioJob>('echo-comparison', async job => {
   if (job.data.speakerAudioId) {
     const { roundId, speakerAudioId } = job.data;
     const key = await comparisons.speakerAudioKey(roundId, speakerAudioId);
-    if (key) await comparisons.saveSpeakerTranscript(roundId, speakerAudioId, await transcribeAudio(roundId, speakerAudioId, key));
+    if (key) {
+      const transcript = await transcribeAudio(roundId, speakerAudioId, key);
+      const candidates = provider ? await provider.extract(transcript).catch(() => []) : [];
+      await comparisons.saveSpeakerTranscript(roundId, speakerAudioId, transcript, candidates);
+    }
     return;
   }
   const input = await comparisons.input(job.data.roundId);
@@ -62,6 +68,9 @@ worker.on('error', error => process.stderr.write(`comparison worker error: ${err
 worker.on('failed', (job, error) => {
   const code = /^[A-Z][A-Z0-9_]{2,60}$/.test(error.message) ? error.message : 'AUDIO_PROCESSING_ERROR';
   process.stderr.write(`comparison job failed id=${job?.id ?? 'unknown'} code=${code}\n`);
+  if (job && !job.data.speakerAudioId && job.attemptsMade >= (job.opts.attempts ?? 1)) {
+    void rooms.failComparison(job.data.roundId).catch(() => process.stderr.write('comparison failure state update failed\n'));
+  }
 });
 
 const scan = async () => {

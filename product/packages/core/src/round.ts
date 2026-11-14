@@ -29,6 +29,7 @@ export interface ComparisonIssue {
 }
 
 export interface Round {
+  terminalReason?: 'TIMEOUT' | 'COMPARISON_FAILED';
   id: string;
   roomId: string;
   mode: Mode;
@@ -56,6 +57,7 @@ export type Command =
   | { type: 'speaker-labeled'; labels: { issueId: string; tag: string; resolution: NonNullable<ComparisonIssue['resolution']> }[] }
   | { type: 'issue-revised'; issueId: string; tag: string; resolution: NonNullable<ComparisonIssue['resolution']> }
   | { type: 'issue-confirmed'; issueId: string }
+  | { type: 'listener-clarified'; issueId: string; note: string }
   | { type: 'seat-switched'; seat: 'speaker' | 'listener' }
   | { type: 'confirmations-submitted' }
   | { type: 'archived' }
@@ -162,12 +164,12 @@ export function applyRoundCommand(round: Round, command: Command, context: Trans
     case 'listener-submitted':
       requireStage(round, 'LISTENER_RETELL'); requireRole(round, context, 'listener');
       if (!command.audioId) fail('AUDIO_REQUIRED', 'Committed audio required');
-      next = { ...round, stage: 'COMPARING', listenerAudioId: command.audioId, deadlineAt: null };
+      next = { ...round, stage: 'COMPARING', listenerAudioId: command.audioId, deadlineAt: due(context.now, 300) };
       break;
     case 'comparison-ready': {
       requireStage(round, 'COMPARING'); requireSystem(context);
       if (new Set(command.issueIds).size !== command.issueIds.length || command.issueIds.some(id => !id)) fail('INVALID_ISSUES', 'Issue IDs must be unique');
-      next = { ...round, stage: 'SPEAKER_LABELING', activeSeat: round.mode === 'solo' ? 'speaker' : round.activeSeat, issues: command.issueIds.map(id => ({ id, revision: 1, tag: null, resolution: null, speakerConfirmedRevision: null, listenerConfirmedRevision: null })) };
+      next = { ...round, stage: 'SPEAKER_LABELING', deadlineAt: null, activeSeat: round.mode === 'solo' ? 'speaker' : round.activeSeat, issues: command.issueIds.map(id => ({ id, revision: 1, tag: null, resolution: null, speakerConfirmedRevision: null, listenerConfirmedRevision: null })) };
       break;
     }
     case 'speaker-labeled': {
@@ -196,6 +198,16 @@ export function applyRoundCommand(round: Round, command: Command, context: Trans
       next = { ...round, issues: round.issues.map(row => row.id !== issue.id ? row : role === 'speaker' ? { ...row, speakerConfirmedRevision: row.revision } : { ...row, listenerConfirmedRevision: row.revision }) };
       break;
     }
+    case 'listener-clarified': {
+      requireStage(round, 'MUTUAL_CONFIRM');
+      requireRole(round, context, 'listener');
+      const issue = issueById(round, command.issueId);
+      if (!issue.tag || !issue.resolution) fail('UNLABELED_ISSUE', 'Issue must be labeled first');
+      // Text is stored encrypted by the repository, not in the round snapshot.
+      next = { ...round, issues: round.issues.map(row => row.id === issue.id
+        ? { ...row, revision: row.revision + 1, speakerConfirmedRevision: null, listenerConfirmedRevision: null } : row) };
+      break;
+    }
     case 'seat-switched':
       requireStage(round, 'MUTUAL_CONFIRM');
       if (round.mode !== 'solo' || context.actor.kind !== 'member' || context.actor.memberId !== round.speakerId) fail('FORBIDDEN_ROLE', 'Only the solo participant may switch seats');
@@ -214,7 +226,7 @@ export function applyRoundCommand(round: Round, command: Command, context: Trans
     case 'expired':
       requireSystem(context);
       if (!round.deadlineAt || context.now.getTime() < Date.parse(round.deadlineAt)) fail('NOT_DUE', 'Deadline has not passed');
-      next = { ...round, stage: 'CANCELLED', deadlineAt: null };
+      next = { ...round, stage: 'CANCELLED', deadlineAt: null, terminalReason: round.stage === 'COMPARING' ? 'COMPARISON_FAILED' : 'TIMEOUT' };
       break;
   }
   return { ...next, version: round.version + 1 };

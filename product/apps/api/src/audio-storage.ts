@@ -2,6 +2,7 @@ import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectComm
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 export interface AudioStorage {
+  prefix(key: string): Promise<Buffer>;
   uploadUrl(key: string, mimeType: string): Promise<string>;
   downloadUrl(key: string, expiresIn?: number): Promise<string>;
   inspect(key: string): Promise<{ bytes: number; mimeType: string } | null>;
@@ -39,6 +40,11 @@ export class S3AudioStorage implements AudioStorage {
     const bytes = await result.Body.transformToByteArray();
     if (bytes.length > 15_000_000) throw new Error('AUDIO_READ_FAILED');
     return Buffer.from(bytes);
+  }
+  async prefix(key: string): Promise<Buffer> {
+    const result = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key, Range: 'bytes=0-15' }));
+    if (!result.Body) return Buffer.alloc(0);
+    return Buffer.from(await result.Body.transformToByteArray());
   }
   async write(key: string, bytes: Buffer, mimeType: string): Promise<void> {
     await this.client.send(new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: bytes, ContentType: mimeType }));

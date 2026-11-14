@@ -61,6 +61,14 @@ test('two clients prepare, start once, leave, and create a clean second room', a
     assert.ok(Date.parse(restarted.json().deadlineAt) >= Date.parse(deadline));
     assert.equal((await post(a, `/api/rounds/${roundId}/restart-recording`, speakerCookie, { expectedVersion: 2, kind: 'speaker' })).statusCode, 409);
     assert.equal((await b.inject({ method: 'GET', url: `/api/rooms/${state.id}`, headers: { cookie: listenerCookie } })).json().deadlineAt, restarted.json().deadlineAt);
+    const past = new Date(Date.now() - 31000);
+    await pool.query("UPDATE rounds SET deadline_at=$2, snapshot=jsonb_set(snapshot,'{deadlineAt}',to_jsonb($3::text)) WHERE id=$1", [roundId, past, past.toISOString()]);
+    await deps.rooms.sweepExpiredRounds(new Date());
+    const expired = (await b.inject({ method: 'GET', url: `/api/rooms/${state.id}`, headers: { cookie: listenerCookie } })).json();
+    assert.equal(expired.stage, 'CANCELLED');
+    assert.equal(expired.terminalReason, 'TIMEOUT');
+    assert.equal(expired.status, 'WAITING');
+    assert.ok(expired.members.every((member: { ready: boolean }) => !member.ready));
     assert.equal((await post(a, `/api/rooms/${state.id}/leave`, speakerCookie, {})).json().status, 'CLOSED');
     assert.equal((await b.inject({ method: 'GET', url: `/api/rooms/${state.id}`, headers: { cookie: listenerCookie } })).statusCode, 403);
     const closed = await pool.query('SELECT status FROM rooms WHERE id = $1', [state.id]);
@@ -70,6 +78,10 @@ test('two clients prepare, start once, leave, and create a clean second room', a
     assert.notEqual(second.json().state.id, state.id);
     assert.equal(second.json().state.members.length, 1);
     assert.equal(second.json().state.members[0].ready, false);
+    for (let attempt = 0; attempt < 12; attempt++) await post(a, '/api/sessions/anonymous', undefined, {});
+    const limited = await post(a, '/api/sessions/anonymous', undefined, {});
+    assert.equal(limited.statusCode, 429);
+    assert.equal(limited.json().error, 'RATE_LIMITED');
   } finally { await Promise.all([a.close(), b.close()]); await pool.end(); }
 });
 
@@ -85,7 +97,7 @@ test('password invitation, observer restriction, concurrent join, and listener r
     const invite = (await post(`/api/rooms/${id}/invitations`, cookies[0], { role: 'observer', minutes: 5, maxUses: 1, password: 'safe1234' })).json();
     assert.equal((await post('/api/rooms/join', cookies[1], { token: invite.token, password: 'wrong123' })).statusCode, 403);
     assert.equal((await post('/api/rooms/join', cookies[1], { token: invite.token, password: 'safe1234' })).statusCode, 200);
-    assert.equal((await post(`/api/rooms/${id}/ready`, cookies[1], { ready: true })).statusCode, 403);
+    assert.equal((await post(`/api/rooms/${id}/ready`, cookies[1], { ready: true })).json().you.ready, true);
     const joins = await Promise.all([post('/api/rooms/join', cookies[2], { token: room.inviteToken }), post('/api/rooms/join', cookies[3], { token: room.inviteToken })]);
     assert.deepEqual(joins.map(r => r.statusCode).sort(), [200, 410]);
     const winnerCookie = joins[0].statusCode === 200 ? cookies[2] : cookies[3];

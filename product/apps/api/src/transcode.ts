@@ -12,8 +12,8 @@ export async function toMp3(input: Buffer, ffmpegPath: string, timeoutMs = 30_00
     const output = join(directory, 'normalized.mp3');
     await writeFile(source, input);
     await new Promise<void>((resolve, reject) => {
-      const process = spawn(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-i', source,
-        '-t', '305', '-vn', '-ac', '1', '-ar', '16000', '-b:a', '64k', output], { stdio: 'ignore', windowsHide: true });
+      const process = spawn(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-protocol_whitelist', 'file', '-threads', '1', '-i', source,
+        '-t', '305', '-map', '0:a:0', '-vn', '-threads', '1', '-ac', '1', '-ar', '16000', '-b:a', '64k', output], { stdio: 'ignore', windowsHide: true });
       const timer = setTimeout(() => { process.kill(); reject(new Error('AUDIO_CONVERSION_TIMEOUT')); }, timeoutMs);
       process.once('error', error => { clearTimeout(timer); reject(error); });
       process.once('close', code => { clearTimeout(timer); code === 0 ? resolve() : reject(new Error('AUDIO_CONVERSION_FAILED')); });

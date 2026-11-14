@@ -24,14 +24,20 @@ export interface AppDependencies {
   ready: () => Promise<boolean>;
   publicOrigin: string;
   production: boolean;
+  trustedProxy?: string | undefined;
+  mediaOrigin?: string | undefined;
   now?: () => Date;
 }
 
 export async function createApp(deps: AppDependencies) {
-  const app = Fastify({ logger: { redact: ['req.headers.cookie', 'req.headers.authorization', 'res.headers.set-cookie'] }, bodyLimit: 16 * 1024, trustProxy: false });
+  const app = Fastify({ logger: { redact: ['req.headers.cookie', 'req.headers.authorization', 'res.headers.set-cookie'] }, bodyLimit: 16 * 1024, trustProxy: deps.trustedProxy ?? false });
   const currentTime = deps.now ?? (() => new Date());
-  await app.register(helmet, { contentSecurityPolicy: false });
-  await app.register(rateLimit, { global: false });
+  const media = deps.mediaOrigin ? [new URL(deps.mediaOrigin).origin] : [];
+  await app.register(helmet, { contentSecurityPolicy: deps.production ? { directives: {
+    connectSrc: ["'self'", ...media], mediaSrc: ["'self'", 'blob:', ...media], objectSrc: ["'none'"],
+  } } : false });
+  await app.register(rateLimit, { global: false, keyGenerator: async request =>
+    (await findSession(deps.sessions, request.headers.cookie, currentTime()))?.id ?? request.ip });
 
   app.addHook('onRequest', async (request, reply) => {
     if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method)) return;

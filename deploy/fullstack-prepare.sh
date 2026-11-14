@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 release=${1:?release required}
+port=${2:-3101}
+[[ "$port" =~ ^310[12]$ ]]
 [[ "$release" =~ ^[a-zA-Z0-9-]+$ ]]
 base=/srv/echo-product
 directory="$base/releases/$release"
@@ -26,6 +28,8 @@ fi
 
 image=semantic-retell-v2-worker:latest
 runtime=(--network semantic-retell-v2_default --env-file "$base/runtime.env" -v "$directory:/echo" -w /echo)
+gateway=$(docker network inspect --format '{{(index .IPAM.Config 0).Gateway}}' semantic-retell-v2_default)
+[[ "$gateway" =~ ^[0-9.]+$ ]]
 docker run --rm "${runtime[@]}" "$image" npm ci --omit=dev --no-audit --no-fund
 docker run --rm "${runtime[@]}" "$image" npm run db:migrate:built
 docker run --rm -i "${runtime[@]}" "$image" node --input-type=module <<'JS'
@@ -40,10 +44,10 @@ catch (error) {
 }
 client.destroy();
 JS
-docker run -d --restart unless-stopped --name "echo-api-$release" "${runtime[@]}" -p 127.0.0.1:3101:3000 "$image" npm run start:api
-docker run -d --restart unless-stopped --name "echo-worker-$release" "${runtime[@]}" "$image" npm run start:worker
+docker run -d --restart unless-stopped --name "echo-api-$release" "${runtime[@]}" -e "TRUSTED_PROXY=$gateway" -p "127.0.0.1:$port:3000" "$image" npm run start:api
+docker run -d --restart unless-stopped --name "echo-worker-$release" "${runtime[@]}" --memory=384m --cpus=1 "$image" npm run start:worker
 for attempt in {1..20}; do
-  if curl -fsS http://127.0.0.1:3101/health/ready; then exit 0; fi
+  if curl -fsS "http://127.0.0.1:$port/health/ready"; then exit 0; fi
   sleep 1
 done
 exit 1

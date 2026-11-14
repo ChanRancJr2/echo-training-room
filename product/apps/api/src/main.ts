@@ -32,9 +32,11 @@ const app = await createApp({
   uploads: config.S3_ACCESS_KEY && config.S3_SECRET_KEY ? new PgUploadStore(pool, new S3AudioStorage({ endpoint: config.S3_ENDPOINT, publicEndpoint: config.S3_PUBLIC_ENDPOINT, region: config.S3_REGION, bucket: config.S3_BUCKET, accessKey: config.S3_ACCESS_KEY, secretKey: config.S3_SECRET_KEY })) : undefined,
   points: cipher ? new PgPointStore(pool, cipher) : undefined,
   comparisons: cipher ? new PgComparisonStore(pool, cipher) : undefined,
-  reviews: new PgReviewStore(pool),
+  reviews: new PgReviewStore(pool, cipher ?? undefined),
   publicOrigin: config.PUBLIC_ORIGIN,
   production: config.NODE_ENV === 'production',
+  trustedProxy: process.env.TRUSTED_PROXY,
+  mediaOrigin: config.S3_PUBLIC_ENDPOINT ?? config.S3_ENDPOINT,
   ready: async () => {
     try {
       const [db, cache] = await Promise.all([pool.query('SELECT 1'), redis.ping()]);
@@ -52,10 +54,12 @@ if (process.env.WEB_ROOT) await app.register(fastifyStatic, {
 
 const close = async () => {
   clearInterval(sweeper);
+  clearInterval(roundSweeper);
   await app.close();
   await Promise.all([pool.end(), redis.quit()]);
 };
 const sweeper = setInterval(() => { void rooms.sweepExpiredSessions(new Date()).catch(error => app.log.error({ error }, 'session sweep failed')); }, 60_000);
+const roundSweeper = setInterval(() => { void rooms.sweepExpiredRounds(new Date()).catch(error => app.log.error({ error }, 'round sweep failed')); }, 10_000);
 process.once('SIGTERM', () => { void close().then(() => process.exit(0)); });
 process.once('SIGINT', () => { void close().then(() => process.exit(0)); });
 await app.listen({ host: '0.0.0.0', port: config.PORT });

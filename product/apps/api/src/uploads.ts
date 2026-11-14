@@ -9,6 +9,18 @@ export type AudioKind = 'speaker' | 'listener';
 type Asset = { id: string; round_id: string; member_id: string; kind: AudioKind; object_key: string; mime_type: string; byte_size: string; state: string; idempotency_key: string; round_version: string };
 const allowedMime = new Set(['audio/webm', 'audio/mp4', 'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/aac']);
 const demand = (code: string, status = 409): never => { throw new RoomError(code, status); };
+export function matchesAudioHeader(mime: string, bytes: Buffer): boolean {
+  const starts = (signature: string) => bytes.subarray(0, signature.length / 2).toString('hex') === signature;
+  switch (mime) {
+    case 'audio/webm': return starts('1a45dfa3');
+    case 'audio/ogg': return starts('4f676753');
+    case 'audio/mp4': return bytes.toString('ascii', 4, 8) === 'ftyp';
+    case 'audio/wav': return starts('52494646') && bytes.toString('ascii', 8, 12) === 'WAVE';
+    case 'audio/mpeg': return starts('494433') || (bytes[0] === 255 && ((bytes[1] ?? 0) & 224) === 224);
+    case 'audio/aac': return bytes[0] === 255 && ((bytes[1] ?? 0) & 246) === 240;
+    default: return false;
+  }
+}
 
 export class PgUploadStore {
   private readonly pool: Pool;
@@ -62,6 +74,9 @@ export class PgUploadStore {
     if (asset.state !== 'COMMITTED') {
       const object = await this.storage.inspect(asset.object_key);
       if (!object || object.bytes !== Number(asset.byte_size) || object.mimeType !== asset.mime_type) return demand('UPLOAD_NOT_VERIFIED');
+      if (!matchesAudioHeader(asset.mime_type, await this.storage.prefix(asset.object_key))) {
+        return demand('UNSUPPORTED_AUDIO', 400);
+      }
     }
     return this.transaction(async db => {
       await lockActiveRoundRoom(db, roundId);

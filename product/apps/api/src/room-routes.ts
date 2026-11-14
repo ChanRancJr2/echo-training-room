@@ -20,6 +20,9 @@ export function registerRoomRoutes(app: FastifyInstance, rooms: PgRoomStore, ses
     const roundError = roundErrorResponse(error);
     if (roundError) return reply.code(roundError.httpStatus).send({ error: roundError.code });
     if (error instanceof RoomError) return reply.code(error.httpStatus).send({ error: error.code });
+    if (typeof error === 'object' && error && 'statusCode' in error && error.statusCode === 429) {
+      return reply.code(429).send({ error: 'RATE_LIMITED', retryAfter: reply.getHeader('retry-after') ?? 60 });
+    }
     app.log.error(error);
     return reply.code(500).send({ error: 'INTERNAL_ERROR' });
   });
@@ -28,10 +31,15 @@ export function registerRoomRoutes(app: FastifyInstance, rooms: PgRoomStore, ses
     if (!session) throw new RoomError('UNAUTHENTICATED', 401);
     return session;
   };
+  app.get('/api/history', async (request, reply) => {
+    const session = await authenticated(request.headers.cookie);
+    reply.header('Cache-Control', 'no-store');
+    return rooms.history(session.id);
+  });
   app.post('/api/rooms', { config: { rateLimit: { max: 8, timeWindow: '1 minute' } } }, async (request, reply) => {
     const parsed = createBody.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'INVALID_INPUT' });
-    if (parsed.data.mode === 'teen' || parsed.data.mode === 'async') return reply.code(409).send({ error: 'MODE_UNAVAILABLE' });
+    if (parsed.data.mode === 'teen') return reply.code(409).send({ error: 'MODE_UNAVAILABLE' });
     const session = await authenticated(request.headers.cookie);
     const created = await rooms.create(session.id, parsed.data.mode, parsed.data.createKey, parsed.data);
     return reply.code(created.inviteToken ? 201 : 200).send(created);
@@ -88,6 +96,13 @@ export function registerRoomRoutes(app: FastifyInstance, rooms: PgRoomStore, ses
     if (!roundId.success || !body.success) return reply.code(400).send({ error: 'INVALID_INPUT' });
     const session = await authenticated(request.headers.cookie);
     return rounds.apply(roundId.data, session.id, body.data.expectedVersion, { type: 'task-set' }, now());
+  });
+  if (rounds) app.post('/api/rounds/:roundId/open-message', async (request, reply) => {
+    const roundId = uuid.safeParse((request.params as { roundId: string }).roundId);
+    const body = z.object({ expectedVersion: z.number().int().positive() }).strict().safeParse(request.body);
+    if (!roundId.success || !body.success) return reply.code(400).send({ error: 'INVALID_INPUT' });
+    const session = await authenticated(request.headers.cookie);
+    return rounds.apply(roundId.data, session.id, body.data.expectedVersion, { type: 'async-opened' }, now());
   });
   if (rounds) app.post('/api/rounds/:roundId/restart-recording', async (request, reply) => {
     const roundId = uuid.safeParse((request.params as { roundId: string }).roundId);
@@ -167,6 +182,9 @@ export function registerRoomRoutes(app: FastifyInstance, rooms: PgRoomStore, ses
       body => ({ type: 'speaker-labeled', labels: body.labels })));
     app.post('/api/rounds/:roundId/review/confirm', async (request, reply) => command(request, reply,
       z.object({ expectedVersion: version, issueId: uuid }).strict(), body => ({ type: 'issue-confirmed', issueId: body.issueId })));
+    app.post('/api/rounds/:roundId/review/clarify', async (request, reply) => command(request, reply,
+      z.object({ expectedVersion: version, issueId: uuid, note: z.string().trim().min(1).max(500) }).strict(),
+      body => ({ type: 'listener-clarified', issueId: body.issueId, note: body.note })));
     app.post('/api/rounds/:roundId/review/revise', async (request, reply) => command(request, reply,
       z.object({ expectedVersion: version, issueId: uuid, tag: label, resolution }).strict(),
       body => ({ type: 'issue-revised', issueId: body.issueId, tag: body.tag, resolution: body.resolution })));

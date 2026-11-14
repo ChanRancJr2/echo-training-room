@@ -14,10 +14,10 @@ export class PgPointStore {
   private readonly cipher: TextCipher;
   constructor(pool: Pool, cipher: TextCipher) { this.pool = pool; this.cipher = cipher; }
 
-  async speakerTranscript(roundId: string, sessionId: string): Promise<{ status: 'off' | 'pending' | 'ready'; text?: string }> {
+  async speakerTranscript(roundId: string, sessionId: string): Promise<{ status: 'off' | 'pending' | 'ready'; text?: string; candidates?: PointInput[] }> {
     const row = (await this.pool.query<{
-      requested: boolean; ciphertext: Buffer | null; nonce: Buffer | null; key_ref: string | null;
-    }>(`SELECT a.transcription_requested AS requested, t.ciphertext, t.nonce, t.key_ref
+      requested: boolean; ciphertext: Buffer | null; nonce: Buffer | null; key_ref: string | null; candidates_ciphertext: Buffer | null; candidates_nonce: Buffer | null;
+    }>(`SELECT a.transcription_requested AS requested, t.ciphertext, t.nonce, t.key_ref, t.candidates_ciphertext, t.candidates_nonce
        FROM rounds r JOIN rooms room ON room.id = r.room_id
        JOIN room_members member ON member.id = (r.snapshot->>'speakerId')::uuid
        JOIN audio_assets a ON a.id = (r.snapshot->>'speakerAudioId')::uuid AND a.state = 'COMMITTED'
@@ -27,7 +27,9 @@ export class PgPointStore {
     if (!row) throw new RoomError('TRANSCRIPT_NOT_ACCESSIBLE', 403);
     if (!row.requested) return { status: 'off' };
     if (!row.ciphertext || !row.nonce || !row.key_ref) return { status: 'pending' };
-    return { status: 'ready', text: this.cipher.decrypt(row.ciphertext, row.nonce, row.key_ref) };
+    const candidates = row.candidates_ciphertext && row.candidates_nonce
+      ? JSON.parse(this.cipher.decrypt(row.candidates_ciphertext, row.candidates_nonce, row.key_ref)) as PointInput[] : [];
+    return { status: 'ready', text: this.cipher.decrypt(row.ciphertext, row.nonce, row.key_ref), candidates };
   }
 
   async confirm(roundId: string, sessionId: string, expectedVersion: number, points: PointInput[]): Promise<{ round: Round; points: PointView[] }> {

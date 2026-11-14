@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { boundedFetch as fetch, newRequestId } from './client.ts';
 
 type UploadResult = { audioId: string; status: string; uploadUrl: string | null };
 type CommitResult = { audioId: string; status: string; round: { stage: string } };
@@ -10,13 +11,12 @@ export function Recorder({ roundId, kind, version, maxSeconds, onBegin, onCommit
   const discardOnStop = useRef(false);
   const stream = useRef<MediaStream | null>(null);
   const chunks = useRef<Blob[]>([]);
-  const idempotencyKey = useRef<string>(crypto.randomUUID());
+  const idempotencyKey = useRef<string | null>(null);
   const [state, setState] = useState<'idle' | 'starting' | 'recording' | 'paused' | 'ready' | 'uploading'>('idle');
   const [audio, setAudio] = useState<Blob | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const [seconds, setSeconds] = useState(0);
   const [error, setError] = useState('');
-  const [transcribe, setTranscribe] = useState(false);
   const [listenerConsent, setListenerConsent] = useState(false);
   useEffect(() => {
     if (state !== 'recording') return;
@@ -24,7 +24,16 @@ export function Recorder({ roundId, kind, version, maxSeconds, onBegin, onCommit
     return () => window.clearInterval(timer);
   }, [state]);
   useEffect(() => { if (state === 'recording' && seconds >= maxSeconds) recorder.current?.stop(); }, [seconds, maxSeconds, state]);
-  useEffect(() => () => { if (recorder.current?.state !== 'inactive') recorder.current?.stop(); stream.current?.getTracks().forEach(track => track.stop()); if (preview) URL.revokeObjectURL(preview); }, [preview]);
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      if (recorder.current && recorder.current.state !== 'inactive') recorder.current.stop();
+      stream.current?.getTracks().forEach(track => track.stop());
+    };
+  }, []);
+  useEffect(() => () => { if (preview) URL.revokeObjectURL(preview); }, [preview]);
 
   async function begin() {
     if (state !== 'idle') return;
@@ -33,16 +42,18 @@ export function Recorder({ roundId, kind, version, maxSeconds, onBegin, onCommit
     try {
       if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) throw new Error('当前浏览器不支持录音，请使用最新版微信或手机浏览器。');
       const media = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!mounted.current) { media.getTracks().forEach(track => track.stop()); return; }
       stream.current = media;
       commitVersion.current = await onBegin();
+      if (!mounted.current) return;
       const mimeType = acceptable.find(candidate => MediaRecorder.isTypeSupported(candidate));
       const current = new MediaRecorder(media, mimeType ? { mimeType } : undefined);
       recorder.current = current; chunks.current = []; discardOnStop.current = false;
-      current.ondataavailable = event => { if (event.data.size) chunks.current.push(event.data); };
+      current.ondataavailable = event => { if (recorder.current === current && event.data.size) chunks.current.push(event.data); };
       current.onerror = () => setError('录音中断，请删除后重试。');
       current.onstop = () => {
         media.getTracks().forEach(track => track.stop());
-        if (discardOnStop.current) { chunks.current = []; return; }
+        if (discardOnStop.current || !mounted.current || recorder.current !== current) return;
         const baseType = current.mimeType.split(';')[0] || 'audio/webm';
         const blob = new Blob(chunks.current, { type: baseType });
         if (!blob.size) { setError('未录到声音，请重新开始。'); setState('idle'); return; }
@@ -62,20 +73,22 @@ export function Recorder({ roundId, kind, version, maxSeconds, onBegin, onCommit
     stream.current?.getTracks().forEach(track => track.stop());
     chunks.current = [];
     if (preview) URL.revokeObjectURL(preview);
-    setAudio(null); setPreview(null); setSeconds(0); setState('idle'); setError(''); setTranscribe(false); setListenerConsent(false); idempotencyKey.current = crypto.randomUUID();
+    recorder.current = null;
+    setAudio(null); setPreview(null); setSeconds(0); setState('idle'); setError(''); setListenerConsent(false); idempotencyKey.current = null;
   }
   async function upload() {
     if (!audio) return;
     setState('uploading'); setError('');
     try {
+      idempotencyKey.current ??= newRequestId();
       const request = await fetch(`/api/rounds/${roundId}/uploads`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind, mimeType: audio.type, byteSize: audio.size, idempotencyKey: idempotencyKey.current }) });
       const data = await request.json() as UploadResult & { error?: string };
       if (!request.ok) throw new Error(data.error ?? '申请上传失败');
       if (data.uploadUrl) {
-        const put = await fetch(data.uploadUrl, { method: 'PUT', headers: { 'Content-Type': audio.type }, body: audio });
+        const put = await fetch(data.uploadUrl, { method: 'PUT', headers: { 'Content-Type': audio.type }, body: audio }, 60000);
         if (!put.ok) throw new Error('录音上传失败，请重试。');
       }
-      const commit = await fetch(`/api/rounds/${roundId}/uploads/${data.audioId}/commit`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedVersion: commitVersion.current, transcribe: kind === 'speaker' && transcribe, consentToTranscribe: kind === 'listener' && listenerConsent }) });
+      const commit = await fetch(`/api/rounds/${roundId}/uploads/${data.audioId}/commit`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedVersion: commitVersion.current, transcribe: kind === 'speaker', consentToTranscribe: kind === 'listener' && listenerConsent }) });
       const result = await commit.json() as CommitResult & { error?: string };
       if (!commit.ok) throw new Error(result.error ?? '提交确认失败');
       await onCommitted();
@@ -89,8 +102,8 @@ export function Recorder({ roundId, kind, version, maxSeconds, onBegin, onCommit
     {state === 'starting' && <p>正在获取录音权限并同步本轮计时…</p>}
     {(state === 'recording' || state === 'paused') && <><button className="secondary" onClick={toggle}>{state === 'recording' ? '暂停录音' : '继续录音'}</button><button className="primary" onClick={finish}>结束录音</button></>}
     {(state === 'recording' || state === 'paused' || state === 'ready') && <button className="secondary" onClick={remove}>删除录音，重新录入</button>}
-    {state === 'ready' && <><audio controls src={preview ?? undefined} />{kind === 'speaker' && <div className="transcription-choice"><span>录音转写 · {transcribe ? '已开启' : '默认关闭'}</span><button className="secondary" onClick={() => setTranscribe(value => !value)}>{transcribe ? '关闭' : '开启'}</button></div>}{kind === 'listener' && <label className="transcription-consent"><input type="checkbox" checked={listenerConsent} onChange={event => setListenerConsent(event.target.checked)} /> 我知晓复述录音提交后会被转写，用于本轮逐条对照。</label>}<button className="primary" disabled={kind === 'listener' && !listenerConsent} onClick={() => void upload()}>确认上传</button></>}
+    {state === 'ready' && <><audio controls src={preview ?? undefined} />{kind === 'speaker' && <div className="transcription-choice">确认上传后会自动转写</div>}{kind === 'listener' && <label className="transcription-consent"><input type="checkbox" checked={listenerConsent} onChange={event => setListenerConsent(event.target.checked)} /> 我知晓复述录音提交后会被转写，用于本轮逐条对照。</label>}<button className="primary" disabled={kind === 'listener' && !listenerConsent} onClick={() => void upload()}>确认上传</button></>}
     {state === 'uploading' && <p>正在上传并确认，请稍候…</p>}
-    {kind === 'speaker' && state !== 'ready' && <p>结束录音后可手动开启转写，默认关闭。</p>}
+    {kind === 'speaker' && state !== 'ready' && <p>确认上传后自动转写，可在本轮信息点页面查看。</p>}
   </section>;
 }

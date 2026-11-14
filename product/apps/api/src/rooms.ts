@@ -36,6 +36,7 @@ export interface RoomState {
   stage: string | null;
   deadlineAt: string | null;
   roundVersion: number | null;
+  terminalReason: Round['terminalReason'] | null;
   activeSeat: Round['activeSeat'] | null;
   speakerAudioId: string | null;
   listenerAudioId: string | null;
@@ -69,15 +70,30 @@ export class PgRoomStore {
     if (!current) return deny('NOT_ROOM_MEMBER', 403);
     const latest = (await db.query<{ id: string; stage: string; deadline_at: Date | null; version: string; snapshot: Round }>(
       'SELECT id, stage, deadline_at, version, snapshot FROM rounds WHERE room_id = $1 ORDER BY sequence DESC LIMIT 1', [roomId])).rows[0];
-    const round = latest?.stage === 'CANCELLED' || (latest?.stage === 'ARCHIVED' && ![latest.snapshot.speakerId, latest.snapshot.listenerId].includes(current.id)) ? undefined : latest;
+    const round = (latest?.stage === 'CANCELLED' && !latest.snapshot.terminalReason) || (latest?.stage === 'ARCHIVED' && ![latest.snapshot.speakerId, latest.snapshot.listenerId].includes(current.id)) ? undefined : latest;
     return { id: room.id, mode: room.mode, status: room.status, durationSeconds: room.duration_seconds, retellStyle: room.retell_style, topic: room.topic,
       version: Number(room.version), roundId: round?.id ?? null, stage: round?.stage ?? null,
       deadlineAt: round?.deadline_at?.toISOString() ?? null, roundVersion: round ? Number(round.version) : null,
       activeSeat: round?.snapshot.activeSeat ?? null,
+      terminalReason: round?.snapshot.terminalReason ?? null,
       speakerAudioId: round?.stage === 'ARCHIVED' ? null : round?.snapshot.speakerAudioId ?? null,
       listenerAudioId: round?.stage === 'ARCHIVED' ? null : round?.snapshot.listenerAudioId ?? null,
       you: { memberId: current.id, role: current.role, ready: current.ready },
       members: rows.map(({ id, nickname, role, ready }) => ({ id, nickname, role, ready })) };
+  }
+
+  async history(sessionId: string) {
+    const result = await this.pool.query<{ id: string; topic: string; mode: string; finishedAt: Date; total: number; complete: number; accurate: number }>(`
+      SELECT r.id, room.topic, room.mode, r.finished_at AS "finishedAt",
+        count(ci.id)::int AS total, count(ci.id) FILTER (WHERE ci.complete)::int AS complete,
+        count(ci.id) FILTER (WHERE ci.accurate)::int AS accurate
+      FROM rounds r JOIN rooms room ON room.id=r.room_id
+      JOIN room_members member ON member.room_id=r.room_id AND member.session_id=$1
+        AND member.id IN ((r.snapshot->>'speakerId')::uuid,(r.snapshot->>'listenerId')::uuid)
+      JOIN comparison_items ci ON ci.round_id=r.id
+      WHERE r.stage='ARCHIVED'
+      GROUP BY r.id, room.topic, room.mode ORDER BY r.finished_at DESC LIMIT 50`, [sessionId]);
+    return result.rows;
   }
 
   async create(sessionId: string, mode: Mode, createKey: string, settings: { durationSeconds: number; retellStyle: 'auditory' | 'keywords'; topic: string } = { durationSeconds: 30, retellStyle: 'auditory', topic: '家庭日常' }): Promise<{ state: RoomState; inviteToken: string | null }> {
@@ -144,7 +160,7 @@ export class PgRoomStore {
     return this.transaction(async db => {
       const room = (await db.query<{ status: string }>('SELECT status FROM rooms WHERE id = $1 FOR UPDATE', [roomId])).rows[0];
       if (!room || room.status !== 'WAITING') return deny('ROOM_NOT_WAITING');
-      const updated = await db.query('UPDATE room_members SET ready = $3 WHERE room_id = $1 AND session_id = $2 AND active AND role != $4 RETURNING id', [roomId, sessionId, ready, 'observer']);
+      const updated = await db.query('UPDATE room_members SET ready = $3 WHERE room_id = $1 AND session_id = $2 AND active RETURNING id', [roomId, sessionId, ready]);
       if (!updated.rowCount) return deny('NOT_ACTIVE_PLAYER', 403);
       await db.query('UPDATE rooms SET version = version + 1 WHERE id = $1', [roomId]);
       return this.state(roomId, sessionId, db);
@@ -232,5 +248,35 @@ export class PgRoomStore {
        WHERE m.active AND (s.expires_at <= $1 OR s.revoked_at IS NOT NULL) LIMIT 200`, [now]);
     for (const { id } of result.rows) await this.leaveAll(id);
     return result.rows.length;
+  }
+
+  async sweepExpiredRounds(now: Date): Promise<void> {
+    const cutoff = new Date(now.getTime() - 30000);
+    const due = await this.pool.query<{ id: string; room_id: string }>(
+      "SELECT id, room_id FROM rounds WHERE deadline_at <= $1 AND stage IN ('SPEAKER_RECORDING','LISTENER_RETELL','ASYNC_PENDING','COMPARING') ORDER BY deadline_at LIMIT 50", [cutoff]);
+    for (const row of due.rows) await this.expireRound(row.room_id, row.id, now, cutoff);
+  }
+
+  async failComparison(roundId: string): Promise<void> {
+    const row = (await this.pool.query<{ room_id: string }>("SELECT room_id FROM rounds WHERE id = $1 AND stage = 'COMPARING'", [roundId])).rows[0];
+    if (row) await this.expireRound(row.room_id, roundId, new Date(), null);
+  }
+
+  private async expireRound(roomId: string, roundId: string, now: Date, cutoff: Date | null): Promise<void> {
+    await this.transaction(async db => {
+      const room = (await db.query<{ status: string }>('SELECT status FROM rooms WHERE id = $1 FOR UPDATE', [roomId])).rows[0];
+      if (room?.status !== 'ACTIVE') return;
+      const row = (await db.query<{ snapshot: Round; deadline_at: Date | null }>(
+        "SELECT snapshot, deadline_at FROM rounds WHERE id = $1 AND stage IN ('SPEAKER_RECORDING','LISTENER_RETELL','ASYNC_PENDING','COMPARING') FOR UPDATE", [roundId])).rows[0];
+      if (!row || (cutoff ? !row.deadline_at || row.deadline_at > cutoff : row.snapshot.stage !== 'COMPARING')) return;
+      const round = cutoff ? row.snapshot : { ...row.snapshot, deadlineAt: now.toISOString() };
+      const next = applyRoundCommand(round, { type: 'expired' }, {
+        actor: { kind: 'system' }, members: [], expectedVersion: round.version, now,
+        speakerSeconds: 30, listenerSeconds: 30, asyncWaitSeconds: 604800,
+      });
+      await db.query("UPDATE rounds SET stage='CANCELLED', deadline_at=NULL, version=$2, snapshot=$3, finished_at=now() WHERE id=$1", [roundId, next.version, next]);
+      await db.query('UPDATE room_members SET ready=false WHERE room_id=$1 AND active', [roomId]);
+      await db.query("UPDATE rooms SET status='WAITING', version=version+1 WHERE id=$1", [roomId]);
+    });
   }
 }

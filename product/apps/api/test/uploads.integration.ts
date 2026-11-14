@@ -18,10 +18,11 @@ if (!url) throw new Error('DATABASE_URL is required');
 const origin = 'http://localhost:3100';
 
 class FakeStorage implements AudioStorage {
-  readonly files = new Map<string, { bytes: number; mimeType: string }>();
+  readonly files = new Map<string, { bytes: number; mimeType: string; invalid?: boolean }>();
   async uploadUrl(key: string) { return `https://storage.test/${key}`; }
   async downloadUrl(key: string) { return `https://storage.test/${key}?signed=1`; }
   async inspect(key: string) { return this.files.get(key) ?? null; }
+  async prefix(key: string) { return this.files.get(key)?.invalid ? Buffer.from('not audio') : Buffer.from('1a45dfa3', 'hex'); }
 }
 
 test('speaker and listener uploads are verified, role-bound and idempotent across API instances', async () => {
@@ -62,6 +63,10 @@ test('speaker and listener uploads are verified, role-bound and idempotent acros
     const key = new URL(asset.uploadUrl).pathname.slice(1);
     const commitUrl = `/api/rounds/${roundId}/uploads/${asset.audioId}/commit`;
     assert.equal((await post(a, commitUrl, hostCookie, { expectedVersion: 3 })).json().error, 'UPLOAD_NOT_VERIFIED');
+    storage.files.set(key, { bytes: 2048, mimeType: 'audio/webm', invalid: true });
+    const rejected = await post(a, commitUrl, hostCookie, { expectedVersion: 3 });
+    assert.equal(rejected.statusCode, 400);
+    assert.equal(rejected.json().error, 'UNSUPPORTED_AUDIO');
     storage.files.set(key, { bytes: 2048, mimeType: 'audio/webm' });
     const commits = await Promise.all([post(a, commitUrl, hostCookie, { expectedVersion: 3, transcribe: true }), post(b, commitUrl, hostCookie, { expectedVersion: 3, transcribe: true })]);
     assert.deepEqual(commits.map(r => r.statusCode), [200, 200]);

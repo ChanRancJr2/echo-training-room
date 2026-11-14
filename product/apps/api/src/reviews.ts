@@ -2,10 +2,12 @@ import type { Pool } from 'pg';
 import { applyRoundCommand, type Command, type Member, type Round } from '../../../packages/core/src/round.ts';
 import { RoomError } from './rooms.ts';
 import { lockActiveRoundRoom } from './round-lock.ts';
+import type { TextCipher } from './crypto.ts';
 
 export class PgReviewStore {
   private readonly pool: Pool;
-  constructor(pool: Pool) { this.pool = pool; }
+  private readonly cipher: TextCipher | undefined;
+  constructor(pool: Pool, cipher?: TextCipher) { this.pool = pool; this.cipher = cipher; }
 
   async apply(roundId: string, sessionId: string, expectedVersion: number, command: Command): Promise<Round> {
     const db = await this.pool.connect();
@@ -37,6 +39,13 @@ export class PgReviewStore {
         await db.query(`INSERT INTO confirmations (item_id, member_id, role, revision) VALUES ($1,$2,$3,$4)
           ON CONFLICT (item_id, role) DO UPDATE SET member_id = $2, revision = $4, confirmed_at = now()`,
           [command.issueId, actor.id, role, revision]);
+      }
+      if (command.type === 'listener-clarified') {
+        if (!this.cipher) throw new RoomError('CLARIFICATION_UNAVAILABLE', 503);
+        const note = this.cipher.encrypt(command.note);
+        await db.query('UPDATE comparison_items SET listener_note_ciphertext=$2, listener_note_nonce=$3, listener_note_key_ref=$4, revision=$5 WHERE id=$1 AND round_id=$6',
+          [command.issueId, note.ciphertext, note.nonce, note.keyRef, next.issues.find(issue => issue.id === command.issueId)?.revision, roundId]);
+        await db.query('DELETE FROM confirmations WHERE item_id=$1', [command.issueId]);
       }
       await db.query('UPDATE rounds SET stage = $2, version = $3, deadline_at = $4, snapshot = $5, finished_at = CASE WHEN $2 = $6 THEN now() ELSE finished_at END WHERE id = $1',
         [roundId, next.stage, next.version, next.deadlineAt, next, 'ARCHIVED']);

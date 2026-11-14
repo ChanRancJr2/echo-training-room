@@ -4,11 +4,13 @@ base=/srv/echo-product
 config=/etc/caddy/Caddyfile
 host=47.239.63.61.sslip.io
 release=${1:?release required}
+port=${2:-3101}
+[[ "$port" =~ ^310[12]$ ]]
 [[ "$release" =~ ^[a-zA-Z0-9-]+$ ]]
 directory="$base/releases/$release"
 test -s "$directory/dist/web/index.html"
-curl -fsS --max-time 5 http://127.0.0.1:3101/health/ready >/dev/null
-curl -fsS --max-time 5 http://127.0.0.1:3101/ | cmp - "$directory/dist/web/index.html"
+curl -fsS --max-time 5 "http://127.0.0.1:$port/health/ready" >/dev/null
+curl -fsS --max-time 5 "http://127.0.0.1:$port/" | cmp - "$directory/dist/web/index.html"
 exec 9>"$base/deploy.lock"
 flock 9
 backup="$base/Caddyfile.before-$release"
@@ -16,7 +18,7 @@ test ! -e "$backup"
 cp -p "$config" "$backup"
 candidate=$(mktemp /etc/caddy/Caddyfile.echo-product.XXXXXX)
 trap 'rm -f -- "$candidate"' EXIT
-awk -v host="$host" '
+awk -v host="$host" -v port="$port" '
   $0 == host " {" {
     matches++
     replacing=1
@@ -24,7 +26,7 @@ awk -v host="$host" '
     print "  encode zstd gzip"
     print "  @previousDemo path /echo-demo /echo-demo/*"
     print "  redir @previousDemo / 302"
-    print "  reverse_proxy 127.0.0.1:3101"
+    print "  reverse_proxy 127.0.0.1:" port
     next
   }
   replacing && $0 == "}" { print; replacing=0; next }

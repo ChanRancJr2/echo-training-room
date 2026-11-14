@@ -2,17 +2,19 @@ import { randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
 import { applyRoundCommand, type Member, type Round } from '../../../packages/core/src/round.ts';
 import type { ComparePoint, ComparedPoint } from './ai-provider.ts';
+import type { PointInput } from './points.ts';
 import { TextCipher } from './crypto.ts';
 import { RoomError } from './rooms.ts';
 import { lockActiveRoundRoom } from './round-lock.ts';
 
 type Sealed = { ciphertext: Buffer; nonce: Buffer; keyRef: string };
 export interface ComparisonView {
+  transcripts?: { speaker: string; listener: string };
   total: number;
   complete: number;
   accurate: number;
   issues: { id: string; category: string; original: string; listenerQuote: string; complete: boolean; accurate: boolean; tag: string | null; clarification: string | null;
-    resolution: string | null; speakerConfirmed: boolean; listenerConfirmed: boolean }[];
+    resolution: string | null; speakerConfirmed: boolean; listenerConfirmed: boolean; listenerNote: string | null }[];
 }
 
 export class PgComparisonStore {
@@ -32,7 +34,7 @@ export class PgComparisonStore {
       FROM rounds r JOIN rooms room ON room.id = r.room_id
       JOIN audio_assets a ON a.id = (r.snapshot->>'speakerAudioId')::uuid
       LEFT JOIN transcripts t ON t.audio_id = a.id
-      WHERE r.stage = 'KEYPOINT_CONFIRM' AND room.status = 'ACTIVE'
+      WHERE r.stage IN ('KEYPOINT_CONFIRM','ASYNC_PENDING','LISTENER_RETELL','COMPARING') AND room.status = 'ACTIVE'
         AND a.kind = 'speaker' AND a.state = 'COMMITTED' AND a.transcription_requested AND t.audio_id IS NULL
       ORDER BY r.created_at LIMIT 100`);
     return result.rows;
@@ -42,21 +44,22 @@ export class PgComparisonStore {
     const row = (await this.pool.query<{ object_key: string }>(`
       SELECT a.object_key FROM rounds r JOIN rooms room ON room.id = r.room_id
       JOIN audio_assets a ON a.id = (r.snapshot->>'speakerAudioId')::uuid
-      WHERE r.id = $1 AND a.id = $2 AND r.stage = 'KEYPOINT_CONFIRM' AND room.status = 'ACTIVE'
+      WHERE r.id = $1 AND a.id = $2 AND r.stage IN ('KEYPOINT_CONFIRM','ASYNC_PENDING','LISTENER_RETELL','COMPARING') AND room.status = 'ACTIVE'
         AND a.kind = 'speaker' AND a.state = 'COMMITTED' AND a.transcription_requested
         AND NOT EXISTS (SELECT 1 FROM transcripts WHERE audio_id = a.id)`, [roundId, audioId])).rows[0];
     return row?.object_key ?? null;
   }
 
-  async saveSpeakerTranscript(roundId: string, audioId: string, transcript: string): Promise<void> {
+  async saveSpeakerTranscript(roundId: string, audioId: string, transcript: string, candidates: PointInput[] = []): Promise<void> {
     const sealed = this.cipher.encrypt(transcript);
+    const points = this.cipher.encrypt(JSON.stringify(candidates));
     await this.pool.query(`
-      INSERT INTO transcripts (id, audio_id, ciphertext, nonce, key_ref)
-      SELECT $3, a.id, $4, $5, $6 FROM rounds r JOIN rooms room ON room.id = r.room_id
+      INSERT INTO transcripts (id, audio_id, ciphertext, nonce, key_ref, candidates_ciphertext, candidates_nonce)
+      SELECT $3, a.id, $4, $5, $6, $7, $8 FROM rounds r JOIN rooms room ON room.id = r.room_id
       JOIN audio_assets a ON a.id = (r.snapshot->>'speakerAudioId')::uuid
-      WHERE r.id = $1 AND a.id = $2 AND r.stage = 'KEYPOINT_CONFIRM' AND room.status = 'ACTIVE'
+      WHERE r.id = $1 AND a.id = $2 AND r.stage IN ('KEYPOINT_CONFIRM','ASYNC_PENDING','LISTENER_RETELL','COMPARING','SPEAKER_LABELING','MUTUAL_CONFIRM','ADVICE') AND room.status = 'ACTIVE'
         AND a.kind = 'speaker' AND a.state = 'COMMITTED' AND a.transcription_requested
-      ON CONFLICT (audio_id) DO NOTHING`, [roundId, audioId, randomUUID(), sealed.ciphertext, sealed.nonce, sealed.keyRef]);
+      ON CONFLICT (audio_id) DO NOTHING`, [roundId, audioId, randomUUID(), sealed.ciphertext, sealed.nonce, sealed.keyRef, points.ciphertext, points.nonce]);
   }
 
   async input(roundId: string): Promise<{ audioKey: string; audioId: string; points: ComparePoint[] } | null> {
@@ -128,18 +131,34 @@ export class PgComparisonStore {
     if (!['SPEAKER_LABELING', 'MUTUAL_CONFIRM', 'ADVICE', 'ARCHIVED'].includes(room.stage)) throw new RoomError('COMPARISON_PENDING', 409);
     const result = await this.pool.query<{ id: string; category: string; content_ciphertext: Buffer; content_nonce: Buffer; content_key_ref: string;
       complete: boolean; accurate: boolean; tag: string | null; resolution: string | null; listener_quote_ciphertext: Buffer | null; listener_quote_nonce: Buffer | null;
-      listener_quote_key_ref: string | null; clarification_ciphertext: Buffer | null; clarification_nonce: Buffer | null; clarification_key_ref: string | null }>(
+      listener_quote_key_ref: string | null; clarification_ciphertext: Buffer | null; clarification_nonce: Buffer | null; clarification_key_ref: string | null;
+      listener_note_ciphertext: Buffer | null; listener_note_nonce: Buffer | null; listener_note_key_ref: string | null }>(
       `SELECT ci.id, kp.category, kp.content_ciphertext, kp.nonce AS content_nonce, kp.key_ref AS content_key_ref,
         ci.complete, ci.accurate, ci.tag, ci.resolution, ci.listener_quote_ciphertext, ci.listener_quote_nonce, ci.listener_quote_key_ref,
-        ci.clarification_ciphertext, ci.clarification_nonce, ci.clarification_key_ref
+        ci.clarification_ciphertext, ci.clarification_nonce, ci.clarification_key_ref,
+        ci.listener_note_ciphertext, ci.listener_note_nonce, ci.listener_note_key_ref
        FROM comparison_items ci JOIN key_points kp ON kp.id = ci.key_point_id WHERE ci.round_id = $1 ORDER BY kp.position`, [roundId]);
     const issues = result.rows.map(row => ({ id: row.id, category: row.category,
       original: this.cipher.decrypt(row.content_ciphertext, row.content_nonce, row.content_key_ref),
       listenerQuote: row.listener_quote_ciphertext && row.listener_quote_nonce && row.listener_quote_key_ref ? this.cipher.decrypt(row.listener_quote_ciphertext, row.listener_quote_nonce, row.listener_quote_key_ref) : '',
       complete: row.complete, accurate: row.accurate, tag: row.tag, resolution: row.resolution,
+      listenerNote: row.listener_note_ciphertext && row.listener_note_nonce && row.listener_note_key_ref
+        ? this.cipher.decrypt(row.listener_note_ciphertext, row.listener_note_nonce, row.listener_note_key_ref) : null,
       speakerConfirmed: room.snapshot.issues.find(issue => issue.id === row.id)?.speakerConfirmedRevision === room.snapshot.issues.find(issue => issue.id === row.id)?.revision && room.snapshot.issues.some(issue => issue.id === row.id),
       listenerConfirmed: room.snapshot.issues.find(issue => issue.id === row.id)?.listenerConfirmedRevision === room.snapshot.issues.find(issue => issue.id === row.id)?.revision && room.snapshot.issues.some(issue => issue.id === row.id),
       clarification: row.clarification_ciphertext && row.clarification_nonce && row.clarification_key_ref ? this.cipher.decrypt(row.clarification_ciphertext, row.clarification_nonce, row.clarification_key_ref) : null }));
-    return { total: issues.length, complete: issues.filter(item => item.complete).length, accurate: issues.filter(item => item.accurate).length, issues };
+    const complete = issues.filter(item => item.complete).length;
+    const accurate = issues.filter(item => item.accurate).length;
+    let transcripts: ComparisonView['transcripts'];
+    if (issues.length && complete === issues.length && accurate === issues.length) {
+      const rows = (await this.pool.query<{ kind: 'speaker' | 'listener'; ciphertext: Buffer; nonce: Buffer; key_ref: string }>(
+        'SELECT a.kind, t.ciphertext, t.nonce, t.key_ref FROM transcripts t JOIN audio_assets a ON a.id=t.audio_id WHERE a.id IN ($1,$2)',
+        [room.snapshot.speakerAudioId, room.snapshot.listenerAudioId])).rows;
+      const speaker = rows.find(row => row.kind === 'speaker');
+      const listener = rows.find(row => row.kind === 'listener');
+      if (speaker && listener) transcripts = { speaker: this.cipher.decrypt(speaker.ciphertext, speaker.nonce, speaker.key_ref),
+        listener: this.cipher.decrypt(listener.ciphertext, listener.nonce, listener.key_ref) };
+    }
+    return { total: issues.length, complete, accurate, issues, ...(transcripts ? { transcripts } : {}) };
   }
 }
