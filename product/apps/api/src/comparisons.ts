@@ -9,12 +9,15 @@ import { lockActiveRoundRoom } from './round-lock.ts';
 
 type Sealed = { ciphertext: Buffer; nonce: Buffer; keyRef: string };
 export interface ComparisonView {
+  adviceAccepted: boolean;
   transcripts?: { speaker: string; listener: string };
+  report?: { topic: string; focus: string; speaker: string; listener: string; speakerAudioId: string | null; listenerAudioId: string | null; hintLevel: number };
   total: number;
   complete: number;
   accurate: number;
   issues: { id: string; category: string; original: string; listenerQuote: string; complete: boolean; accurate: boolean; tag: string | null; clarification: string | null;
-    resolution: string | null; speakerConfirmed: boolean; listenerConfirmed: boolean; listenerNote: string | null }[];
+    resolution: string | null; speakerConfirmed: boolean; listenerConfirmed: boolean; listenerNote: string | null; speakerQuote: string | null;
+    observerTag: string | null; observerNote: string | null }[];
 }
 
 export class PgComparisonStore {
@@ -121,44 +124,71 @@ export class PgComparisonStore {
   }
 
   async view(roundId: string, sessionId: string): Promise<ComparisonView> {
-    const room = (await this.pool.query<{ room_id: string; status: string; stage: string; snapshot: Round }>(`SELECT r.room_id, room.status, r.stage, r.snapshot FROM rounds r
+    const room = (await this.pool.query<{ room_id: string; status: string; stage: string; snapshot: Round; topic: string }>(`SELECT r.room_id, room.status, r.stage, r.snapshot, room.topic FROM rounds r
       JOIN rooms room ON room.id = r.room_id WHERE r.id = $1`, [roundId])).rows[0];
     if (!room) throw new RoomError('ROUND_NOT_FOUND', 404);
-    const member = (await this.pool.query<{ id: string }>(`SELECT id FROM room_members WHERE room_id = $1 AND session_id = $2 AND active`, [room.room_id, sessionId])).rows[0];
-    if (!member || room.status === 'CLOSED' || (room.stage === 'ARCHIVED' && ![room.snapshot.speakerId, room.snapshot.listenerId].includes(member.id))) {
-      throw new RoomError('NOT_ROOM_MEMBER', 403);
-    }
+    const archived = room.stage === 'ARCHIVED';
+    const member = (await this.pool.query(`SELECT 1 FROM room_members WHERE room_id = $1 AND session_id = $2
+      AND (CASE WHEN $3 THEN id IN ($4, $5) ELSE active END) LIMIT 1`,
+      [room.room_id, sessionId, archived, room.snapshot.speakerId, room.snapshot.listenerId])).rowCount;
+    if (!member || (!archived && room.status === 'CLOSED')) throw new RoomError('NOT_ROOM_MEMBER', 403);
     if (!['SPEAKER_LABELING', 'MUTUAL_CONFIRM', 'ADVICE', 'ARCHIVED'].includes(room.stage)) throw new RoomError('COMPARISON_PENDING', 409);
     const result = await this.pool.query<{ id: string; category: string; content_ciphertext: Buffer; content_nonce: Buffer; content_key_ref: string;
       complete: boolean; accurate: boolean; tag: string | null; resolution: string | null; listener_quote_ciphertext: Buffer | null; listener_quote_nonce: Buffer | null;
       listener_quote_key_ref: string | null; clarification_ciphertext: Buffer | null; clarification_nonce: Buffer | null; clarification_key_ref: string | null;
-      listener_note_ciphertext: Buffer | null; listener_note_nonce: Buffer | null; listener_note_key_ref: string | null }>(
+      listener_note_ciphertext: Buffer | null; listener_note_nonce: Buffer | null; listener_note_key_ref: string | null;
+      observer_tag: string | null; observer_note_ciphertext: Buffer | null; observer_note_nonce: Buffer | null; observer_note_key_ref: string | null }>(
       `SELECT ci.id, kp.category, kp.content_ciphertext, kp.nonce AS content_nonce, kp.key_ref AS content_key_ref,
         ci.complete, ci.accurate, ci.tag, ci.resolution, ci.listener_quote_ciphertext, ci.listener_quote_nonce, ci.listener_quote_key_ref,
         ci.clarification_ciphertext, ci.clarification_nonce, ci.clarification_key_ref,
-        ci.listener_note_ciphertext, ci.listener_note_nonce, ci.listener_note_key_ref
+        ci.listener_note_ciphertext, ci.listener_note_nonce, ci.listener_note_key_ref,
+        ci.observer_tag, ci.observer_note_ciphertext, ci.observer_note_nonce, ci.observer_note_key_ref
        FROM comparison_items ci JOIN key_points kp ON kp.id = ci.key_point_id WHERE ci.round_id = $1 ORDER BY kp.position`, [roundId]);
-    const issues = result.rows.map(row => ({ id: row.id, category: row.category,
+    const states = new Map(room.snapshot.issues.map(issue => [issue.id, issue]));
+    const issues = result.rows.map(row => ({ id: row.id, category: row.category, speakerQuote: null as string | null,
       original: this.cipher.decrypt(row.content_ciphertext, row.content_nonce, row.content_key_ref),
       listenerQuote: row.listener_quote_ciphertext && row.listener_quote_nonce && row.listener_quote_key_ref ? this.cipher.decrypt(row.listener_quote_ciphertext, row.listener_quote_nonce, row.listener_quote_key_ref) : '',
       complete: row.complete, accurate: row.accurate, tag: row.tag, resolution: row.resolution,
       listenerNote: row.listener_note_ciphertext && row.listener_note_nonce && row.listener_note_key_ref
         ? this.cipher.decrypt(row.listener_note_ciphertext, row.listener_note_nonce, row.listener_note_key_ref) : null,
-      speakerConfirmed: room.snapshot.issues.find(issue => issue.id === row.id)?.speakerConfirmedRevision === room.snapshot.issues.find(issue => issue.id === row.id)?.revision && room.snapshot.issues.some(issue => issue.id === row.id),
-      listenerConfirmed: room.snapshot.issues.find(issue => issue.id === row.id)?.listenerConfirmedRevision === room.snapshot.issues.find(issue => issue.id === row.id)?.revision && room.snapshot.issues.some(issue => issue.id === row.id),
+      observerTag: row.observer_tag,
+      observerNote: row.observer_note_ciphertext && row.observer_note_nonce && row.observer_note_key_ref
+        ? this.cipher.decrypt(row.observer_note_ciphertext, row.observer_note_nonce, row.observer_note_key_ref) : null,
+      speakerConfirmed: states.has(row.id) && states.get(row.id)?.speakerConfirmedRevision === states.get(row.id)?.revision,
+      listenerConfirmed: states.has(row.id) && states.get(row.id)?.listenerConfirmedRevision === states.get(row.id)?.revision,
       clarification: row.clarification_ciphertext && row.clarification_nonce && row.clarification_key_ref ? this.cipher.decrypt(row.clarification_ciphertext, row.clarification_nonce, row.clarification_key_ref) : null }));
     const complete = issues.filter(item => item.complete).length;
     const accurate = issues.filter(item => item.accurate).length;
     let transcripts: ComparisonView['transcripts'];
-    if (issues.length && complete === issues.length && accurate === issues.length) {
-      const rows = (await this.pool.query<{ kind: 'speaker' | 'listener'; ciphertext: Buffer; nonce: Buffer; key_ref: string }>(
+    const fullText = archived || (issues.length > 0 && complete === issues.length && accurate === issues.length);
+    const rows = (await this.pool.query<{ kind: 'speaker' | 'listener'; ciphertext: Buffer; nonce: Buffer; key_ref: string }>(
         'SELECT a.kind, t.ciphertext, t.nonce, t.key_ref FROM transcripts t JOIN audio_assets a ON a.id=t.audio_id WHERE a.id IN ($1,$2)',
-        [room.snapshot.speakerAudioId, room.snapshot.listenerAudioId])).rows;
-      const speaker = rows.find(row => row.kind === 'speaker');
-      const listener = rows.find(row => row.kind === 'listener');
-      if (speaker && listener) transcripts = { speaker: this.cipher.decrypt(speaker.ciphertext, speaker.nonce, speaker.key_ref),
-        listener: this.cipher.decrypt(listener.ciphertext, listener.nonce, listener.key_ref) };
+        [room.snapshot.speakerAudioId, fullText ? room.snapshot.listenerAudioId : null])).rows;
+    const speaker = rows.find(row => row.kind === 'speaker');
+    const listener = rows.find(row => row.kind === 'listener');
+    const source = speaker ? this.cipher.decrypt(speaker.ciphertext, speaker.nonce, speaker.key_ref) : '';
+    const sentences = source.match(/[^。！？!?\n]+[。！？!?]?/g) ?? [];
+    for (const issue of issues) {
+      const phrase = issue.original.trim().replace(/[。！？!?]$/, '');
+      if (phrase.length >= 3) issue.speakerQuote = sentences.find(sentence => sentence.includes(phrase))?.trim() ?? null;
     }
-    return { total: issues.length, complete, accurate, issues, ...(transcripts ? { transcripts } : {}) };
+    if (speaker && listener) transcripts = { speaker: source, listener: this.cipher.decrypt(listener.ciphertext, listener.nonce, listener.key_ref) };
+    let report: ComparisonView['report'];
+    if (archived) {
+      const [metadata, names] = await Promise.all([
+        this.pool.query<{ ciphertext: Buffer | null; nonce: Buffer | null; key_ref: string | null; hint: number }>(`SELECT f.ciphertext, f.nonce, f.key_ref,
+          CASE WHEN a.keywords_used THEN 3 WHEN a.replay_used THEN 2 ELSE 1 END AS hint
+          FROM rounds r LEFT JOIN round_task_focus f ON f.round_id=r.id LEFT JOIN round_listening_aids a ON a.round_id=r.id WHERE r.id=$1`, [roundId]),
+        this.pool.query<{ id: string; nickname: string }>(`SELECT m.id, s.nickname FROM room_members m JOIN sessions s ON s.id=m.session_id WHERE m.id IN ($1,$2)`,
+          [room.snapshot.speakerId, room.snapshot.listenerId]),
+      ]);
+      const row = metadata.rows[0];
+      report = { topic: room.topic, focus: row?.ciphertext && row.nonce && row.key_ref ? this.cipher.decrypt(row.ciphertext, row.nonce, row.key_ref) : '',
+        speaker: names.rows.find(person => person.id === room.snapshot.speakerId)?.nickname ?? '表达者',
+        listener: names.rows.find(person => person.id === room.snapshot.listenerId)?.nickname ?? '复述者', hintLevel: row?.hint ?? 1,
+        speakerAudioId: room.snapshot.speakerAudioId, listenerAudioId: room.snapshot.listenerAudioId };
+    }
+    return { total: issues.length, complete, accurate, issues, adviceAccepted: room.snapshot.adviceAccepted ?? false,
+      ...(transcripts ? { transcripts } : {}), ...(report ? { report } : {}) };
   }
 }

@@ -7,3 +7,32 @@
 .transcription-consent{display:flex;align-items:flex-start;gap:8px;font-size:12px;line-height:1.6;background:#f3f7f3;border-radius:10px;padding:12px;margin:10px 0}.transcription-consent input{accent-color:#265e5c;margin-top:3px}
 .comparison-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.comparison-grid>div{padding:12px;border-radius:10px;background:#f3f7f3}.comparison-grid span,.comparison-grid strong{display:block}.comparison-grid span{font-size:11px;color:#64736e}.comparison-grid strong{margin-top:6px;color:#265e5c}.comparison-item{border-top:1px solid #e1e7e1;padding:12px 0}.comparison-item h4{margin:3px 0 10px}.comparison-item p{margin:6px 0}
 .review-fields{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin:12px 0}.review-fields label{font-size:12px}.review-fields select{display:block;width:100%;padding:10px 6px;margin-top:5px;border:1px solid #d6ddd8;border-radius:9px;background:#fff}.review-confirm{padding:10px;background:#f3f7f3;border-radius:9px;font-size:12px}.review-confirm .secondary{margin-top:8px}.review-confirm .text-button{padding:8px 0}
+
+.flow-title{font-size:clamp(1.65rem,7vw,2.25rem);margin:12px 0;letter-spacing:-.025em}
+.flow-context{color:#536a65;font-size:.875rem;line-height:1.6}
+.stepper{color:#536a65;font-size:.8rem;margin-top:20px}
+.stepper div{display:grid;grid-template-columns:repeat(9,minmax(0,1fr));gap:5px;margin-top:8px}
+.stepper i{height:4px;border-radius:4px;background:#d6ded8}
+.stepper i.filled{background:#265e5c}
+.round-content .recorder,.round-content .point-editor{border:0;margin:0;padding:0}
+.round-content .audio-player + .recorder{border-top:1px solid #d6ded8;margin-top:20px;padding-top:18px}
+.audio-player audio{display:block;width:100%;margin-top:8px}
+.audio-player audio:not([controls]){display:none}
+.card input[type=checkbox]{width:auto;margin:3px 6px 0 0;accent-color:#265e5c}
+.card textarea,.search-field input,.review-confirm select{display:block;width:100%;padding:11px;border:1px solid #d6ddd8;border-radius:10px;background:#fff;font:inherit;margin-top:8px}
+.search-field,.toggle-row{display:block;font-size:.875rem}
+.comparison-grid{grid-auto-rows:1fr}
+.comparison-grid p{margin:5px 0 0;overflow-wrap:anywhere}
+.comparison-view blockquote{border-left:3px solid #dd9e79;margin:14px 0;padding:12px 15px;background:#f8f3ea}
+.report-download{display:inline-block;color:#265e5c;padding:12px 0}
+.history-trend{list-style:none;margin:0;padding:0;display:grid;gap:12px}
+.history-trend li{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:4px 9px;font-size:.8rem}
+.history-trend meter{width:100%;height:1rem;accent-color:#265e5c}
+.history-trend small{grid-column:1/-1;color:#536a65}
+.keyword-hints{padding-left:1.3rem;color:#365851;font-size:.875rem;line-height:1.6}
+.point-row{display:flex;gap:8px;align-items:center;margin-top:12px}
+.point-row label{flex:1;min-width:0;font-size:.8rem}
+.point-row button{flex:none}
+.flow-context[data-seat="speaker"]{background:#f5e3d5;color:#6c3e29}
+.flow-context[data-seat="listener"]{background:#e1eeec;color:#265e5c}
+.flow-context[data-seat]{padding:8px 11px;border-radius:9px}

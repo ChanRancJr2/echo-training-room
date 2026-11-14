@@ -1,5 +1,5 @@
 import type { Pool } from 'pg';
-import { applyRoundCommand, type Command, type Member, type Round } from '../../../packages/core/src/round.ts';
+import { applyRoundCommand, isSameDevice, type Command, type Member, type Round } from '../../../packages/core/src/round.ts';
 import { RoomError } from './rooms.ts';
 import { lockActiveRoundRoom } from './round-lock.ts';
 import type { TextCipher } from './crypto.ts';
@@ -34,7 +34,7 @@ export class PgReviewStore {
         if (after?.revision !== before?.revision) await db.query('DELETE FROM confirmations WHERE item_id = $1', [command.issueId]);
       }
       if (command.type === 'issue-confirmed') {
-        const role = round.mode === 'solo' ? round.activeSeat : actor.role;
+        const role = isSameDevice(round.mode) ? round.activeSeat : actor.role;
         const revision = next.issues.find(issue => issue.id === command.issueId)?.revision;
         await db.query(`INSERT INTO confirmations (item_id, member_id, role, revision) VALUES ($1,$2,$3,$4)
           ON CONFLICT (item_id, role) DO UPDATE SET member_id = $2, revision = $4, confirmed_at = now()`,
@@ -46,6 +46,12 @@ export class PgReviewStore {
         await db.query('UPDATE comparison_items SET listener_note_ciphertext=$2, listener_note_nonce=$3, listener_note_key_ref=$4, revision=$5 WHERE id=$1 AND round_id=$6',
           [command.issueId, note.ciphertext, note.nonce, note.keyRef, next.issues.find(issue => issue.id === command.issueId)?.revision, roundId]);
         await db.query('DELETE FROM confirmations WHERE item_id=$1', [command.issueId]);
+      }
+      if (command.type === 'observer-annotated') {
+        if (!this.cipher) throw new RoomError('OBSERVATION_UNAVAILABLE', 503);
+        const note = this.cipher.encrypt(command.note);
+        await db.query(`UPDATE comparison_items SET observer_tag=$2, observer_note_ciphertext=$3, observer_note_nonce=$4, observer_note_key_ref=$5
+          WHERE id=$1 AND round_id=$6`, [command.issueId, command.tag, note.ciphertext, note.nonce, note.keyRef, roundId]);
       }
       await db.query('UPDATE rounds SET stage = $2, version = $3, deadline_at = $4, snapshot = $5, finished_at = CASE WHEN $2 = $6 THEN now() ELSE finished_at END WHERE id = $1',
         [roundId, next.stage, next.version, next.deadlineAt, next, 'ARCHIVED']);

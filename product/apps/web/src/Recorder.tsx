@@ -5,7 +5,7 @@ type UploadResult = { audioId: string; status: string; uploadUrl: string | null 
 type CommitResult = { audioId: string; status: string; round: { stage: string } };
 const acceptable = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/webm', 'audio/ogg;codecs=opus'];
 
-export function Recorder({ roundId, kind, version, maxSeconds, onBegin, onCommitted }: { roundId: string; kind: 'speaker' | 'listener'; version: number; maxSeconds: number; onBegin: () => Promise<number>; onCommitted: () => Promise<void> }) {
+export function Recorder({ roundId, kind, version, maxSeconds, onBegin, onCommitted, onCaptureChange }: { roundId: string; kind: 'speaker' | 'listener'; version: number; maxSeconds: number; onBegin: () => Promise<number>; onCommitted: () => Promise<void>; onCaptureChange?: (active: boolean) => void }) {
   const recorder = useRef<MediaRecorder | null>(null);
   const commitVersion = useRef(version);
   const discardOnStop = useRef(false);
@@ -38,6 +38,7 @@ export function Recorder({ roundId, kind, version, maxSeconds, onBegin, onCommit
   async function begin() {
     if (state !== 'idle') return;
     setState('starting');
+    onCaptureChange?.(true);
     setError('');
     try {
       if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) throw new Error('当前浏览器不支持录音，请使用最新版微信或手机浏览器。');
@@ -54,13 +55,14 @@ export function Recorder({ roundId, kind, version, maxSeconds, onBegin, onCommit
       current.onstop = () => {
         media.getTracks().forEach(track => track.stop());
         if (discardOnStop.current || !mounted.current || recorder.current !== current) return;
+        onCaptureChange?.(false);
         const baseType = current.mimeType.split(';')[0] || 'audio/webm';
         const blob = new Blob(chunks.current, { type: baseType });
         if (!blob.size) { setError('未录到声音，请重新开始。'); setState('idle'); return; }
         setAudio(blob); setPreview(URL.createObjectURL(blob)); setState('ready');
       };
       current.start(500); setSeconds(0); setState('recording');
-    } catch (cause) { setError(cause instanceof Error ? cause.message : '无法使用麦克风'); stream.current?.getTracks().forEach(track => track.stop()); setState('idle'); }
+    } catch (cause) { if (mounted.current) { onCaptureChange?.(false); setError(cause instanceof Error ? cause.message : '无法使用麦克风'); setState('idle'); } stream.current?.getTracks().forEach(track => track.stop()); }
   }
   function toggle() {
     if (recorder.current?.state === 'recording') { recorder.current.pause(); setState('paused'); }
@@ -74,6 +76,7 @@ export function Recorder({ roundId, kind, version, maxSeconds, onBegin, onCommit
     chunks.current = [];
     if (preview) URL.revokeObjectURL(preview);
     recorder.current = null;
+    onCaptureChange?.(false);
     setAudio(null); setPreview(null); setSeconds(0); setState('idle'); setError(''); setListenerConsent(false); idempotencyKey.current = null;
   }
   async function upload() {

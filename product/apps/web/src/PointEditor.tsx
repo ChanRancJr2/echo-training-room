@@ -53,8 +53,14 @@ export function PointEditor({ roundId, version, onConfirmed }: { roundId: string
     {transcript?.status === 'ready' && <details open><summary>表达录音转写</summary><p>{transcript.text || '未识别到清晰的语音。请手动填写要点。'}</p></details>}
     <div className="point-entry"><select aria-label="信息点类别" value={category} onChange={event => setCategory(event.target.value as Category)}>{categories.map(value => <option key={value}>{value}</option>)}</select><input aria-label="信息点内容" maxLength={200} value={text} onChange={event => setText(event.target.value)} placeholder="例如：午饭要看外婆身体情况" /></div>
     <button className="secondary" disabled={!text.trim() || points.length >= 12} onClick={add}>添加信息点</button>
-    {points.map((point, index) => <div className="member" key={`${index}-${point.text}`}><span>{point.category}：{point.text}</span><button className="text-button" onClick={() => setPoints(current => current.filter((_, position) => position !== index))}>删除</button></div>)}
+    {points.map((point, index) => <div className="point-row" key={index}>
+      <label>{point.category}<input aria-label={`第 ${index + 1} 条信息点`} maxLength={200} value={point.text} onChange={event => {
+        const value = event.target.value;
+        setPoints(current => current.map((item, position) => position === index ? { ...item, text: value } : item));
+      }} /></label>
+      <button className="text-button" onClick={() => setPoints(current => current.filter((_, position) => position !== index))}>删除</button>
+    </div>)}
     {error && <p role="alert" className="error-text">{error}</p>}
-    <button className="primary" disabled={!points.length || busy} onClick={() => void confirm()}>确认重点，请搭档复述</button>
+    <button className="primary" disabled={!points.length || points.some(point => !point.text.trim()) || busy} onClick={() => void confirm()}>确认重点，请搭档复述</button>
   </section>;
 }

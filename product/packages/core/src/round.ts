@@ -1,4 +1,5 @@
 export type Mode = 'sync' | 'solo' | 'teen' | 'async';
+export const isSameDevice = (mode: Mode) => mode === 'solo' || mode === 'teen';
 export type Role = 'speaker' | 'listener' | 'observer';
 export type Stage =
   | 'TASK'
@@ -30,6 +31,7 @@ export interface ComparisonIssue {
 
 export interface Round {
   terminalReason?: 'TIMEOUT' | 'COMPARISON_FAILED';
+  adviceAccepted?: boolean;
   id: string;
   roomId: string;
   mode: Mode;
@@ -58,8 +60,10 @@ export type Command =
   | { type: 'issue-revised'; issueId: string; tag: string; resolution: NonNullable<ComparisonIssue['resolution']> }
   | { type: 'issue-confirmed'; issueId: string }
   | { type: 'listener-clarified'; issueId: string; note: string }
+  | { type: 'observer-annotated'; issueId: string; tag: string; note: string }
   | { type: 'seat-switched'; seat: 'speaker' | 'listener' }
   | { type: 'confirmations-submitted' }
+  | { type: 'advice-accepted' }
   | { type: 'archived' }
   | { type: 'expired' };
 
@@ -95,7 +99,7 @@ function memberRole(round: Round, context: TransitionContext): Role {
   const memberId = context.actor.memberId;
   const member = context.members.find(row => row.id === memberId && row.active);
   if (!member) return fail('NOT_MEMBER', 'Active room membership required');
-  if (round.mode === 'solo' && member.id === round.speakerId && member.id === round.listenerId) return round.activeSeat;
+  if (isSameDevice(round.mode) && member.id === round.speakerId && member.id === round.listenerId) return round.activeSeat;
   if (member.role === 'speaker' && member.id !== round.speakerId) return fail('ROLE_MISMATCH', 'Speaker seat mismatch');
   if (member.role === 'listener' && member.id !== round.listenerId) return fail('ROLE_MISMATCH', 'Listener seat mismatch');
   return member.role;
@@ -126,7 +130,7 @@ function clearConfirmation(issue: ComparisonIssue, tag: string, resolution: NonN
 
 export function newRound(input: Pick<Round, 'id' | 'roomId' | 'mode' | 'speakerId' | 'listenerId'>): Round {
   if (!input.id || !input.roomId || !input.speakerId || !input.listenerId) fail('INVALID_ROUND', 'Required identifiers missing');
-  if (input.mode !== 'solo' && input.speakerId === input.listenerId) fail('INVALID_ROLES', 'Distinct members required');
+  if (!isSameDevice(input.mode) && input.speakerId === input.listenerId) fail('INVALID_ROLES', 'Distinct members required');
   return { ...input, stage: 'TASK', version: 1, deadlineAt: null, activeSeat: 'speaker', speakerAudioId: null, listenerAudioId: null, confirmedPointCount: 0, issues: [] };
 }
 
@@ -155,7 +159,7 @@ export function applyRoundCommand(round: Round, command: Command, context: Trans
     case 'points-confirmed':
       requireStage(round, 'KEYPOINT_CONFIRM'); requireRole(round, context, 'speaker');
       if (!Number.isInteger(command.pointCount) || command.pointCount < 1) fail('POINTS_REQUIRED', 'At least one confirmed point required');
-      next = { ...round, stage: round.mode === 'async' ? 'ASYNC_PENDING' : 'LISTENER_RETELL', activeSeat: round.mode === 'solo' ? 'listener' : round.activeSeat, confirmedPointCount: command.pointCount, deadlineAt: due(context.now, round.mode === 'async' ? context.asyncWaitSeconds : context.listenerSeconds) };
+      next = { ...round, stage: round.mode === 'async' ? 'ASYNC_PENDING' : 'LISTENER_RETELL', activeSeat: isSameDevice(round.mode) ? 'listener' : round.activeSeat, confirmedPointCount: command.pointCount, deadlineAt: due(context.now, round.mode === 'async' ? context.asyncWaitSeconds : context.listenerSeconds) };
       break;
     case 'async-opened':
       requireStage(round, 'ASYNC_PENDING'); requireRole(round, context, 'listener');
@@ -169,7 +173,7 @@ export function applyRoundCommand(round: Round, command: Command, context: Trans
     case 'comparison-ready': {
       requireStage(round, 'COMPARING'); requireSystem(context);
       if (new Set(command.issueIds).size !== command.issueIds.length || command.issueIds.some(id => !id)) fail('INVALID_ISSUES', 'Issue IDs must be unique');
-      next = { ...round, stage: 'SPEAKER_LABELING', deadlineAt: null, activeSeat: round.mode === 'solo' ? 'speaker' : round.activeSeat, issues: command.issueIds.map(id => ({ id, revision: 1, tag: null, resolution: null, speakerConfirmedRevision: null, listenerConfirmedRevision: null })) };
+      next = { ...round, stage: 'SPEAKER_LABELING', deadlineAt: null, activeSeat: isSameDevice(round.mode) ? 'speaker' : round.activeSeat, issues: command.issueIds.map(id => ({ id, revision: 1, tag: null, resolution: null, speakerConfirmedRevision: null, listenerConfirmedRevision: null })) };
       break;
     }
     case 'speaker-labeled': {
@@ -208,9 +212,15 @@ export function applyRoundCommand(round: Round, command: Command, context: Trans
         ? { ...row, revision: row.revision + 1, speakerConfirmedRevision: null, listenerConfirmedRevision: null } : row) };
       break;
     }
+    case 'observer-annotated':
+      if (round.stage !== 'SPEAKER_LABELING' && round.stage !== 'MUTUAL_CONFIRM') fail('WRONG_STAGE', 'Review must be open');
+      requireRole(round, context, 'observer');
+      issueById(round, command.issueId);
+      next = round;
+      break;
     case 'seat-switched':
       requireStage(round, 'MUTUAL_CONFIRM');
-      if (round.mode !== 'solo' || context.actor.kind !== 'member' || context.actor.memberId !== round.speakerId) fail('FORBIDDEN_ROLE', 'Only the solo participant may switch seats');
+      if (!isSameDevice(round.mode) || context.actor.kind !== 'member' || context.actor.memberId !== round.speakerId) fail('FORBIDDEN_ROLE', 'Only the same-device participant may switch seats');
       if (!context.members.some(row => row.id === round.speakerId && row.active)) fail('NOT_MEMBER', 'Active room membership required');
       next = { ...round, activeSeat: command.seat };
       break;
@@ -218,6 +228,10 @@ export function applyRoundCommand(round: Round, command: Command, context: Trans
       requireStage(round, 'MUTUAL_CONFIRM'); requireRole(round, context, 'speaker');
       if (round.issues.some(issue => issue.speakerConfirmedRevision !== issue.revision || issue.listenerConfirmedRevision !== issue.revision)) fail('UNCONFIRMED_ISSUES', 'Both roles must confirm every issue');
       next = { ...round, stage: 'ADVICE' };
+      break;
+    case 'advice-accepted':
+      requireStage(round, 'ADVICE'); requireRole(round, context, 'speaker');
+      next = { ...round, adviceAccepted: true };
       break;
     case 'archived':
       requireStage(round, 'ADVICE'); requireRole(round, context, 'speaker');

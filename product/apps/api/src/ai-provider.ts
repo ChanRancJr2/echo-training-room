@@ -40,7 +40,7 @@ export function normalizeComparison(points: ComparePoint[], raw: unknown): Compa
     const item = unique.get(point.id);
     if (!item) return fallback(point);
     const complete = item.complete;
-    const accurate = complete && item.accurate;
+    const accurate = item.accurate && (complete || Boolean(item.listenerQuote.trim()));
     const tag = complete && accurate ? null : supportedTags.has(item.tag ?? '') ? item.tag : '理解不到位';
     return { id: point.id, complete, accurate, listenerQuote: item.listenerQuote.trim(), tag,
       clarification: item.clarification?.trim().slice(0, 200) || null };
@@ -84,8 +84,10 @@ export class VolcAiProvider implements AiProvider {
 
   async compare(points: ComparePoint[], listenerTranscript: string): Promise<ComparedPoint[]> {
     if (!listenerTranscript.trim()) return points.map(fallback);
-    const prompt = `请对照表达者确认的信息点与复述者转写，逐条给出辅助判断。只评价给出的信息点，不虚构原话。完整表示该点被复述；准确表示意思和条件均正确。listenerQuote 只截取复述转写中的对应原文，没有则为空。tag 在遗漏重要信息、理解不到位、理解偏了、杜撰信息、强加信息、语气被误解、重点被误解中选；无问题时为 null。clarification 是可能有争议时的一句澄清问题，无则为 null。返回 json 对象 {"items":[{"id":"...","complete":true,"accurate":true,"listenerQuote":"...","tag":null,"clarification":null}]}。\n${JSON.stringify({ points, listenerTranscript: listenerTranscript.slice(0, 8000) })}`;
-    return normalizeComparison(points, await this.jsonAnswer(prompt));
+    const transcript = listenerTranscript.slice(0, 8000);
+    const prompt = `请对照表达者确认的信息点与复述者转写，逐条给出辅助判断。只评价给出的信息点，不虚构原话。完整表示该点的必要内容都被复述。准确表示已经复述的内容意思正确，允许部分复述准确但不完整。完全没有复述时两项均为 false。listenerQuote 只截取复述转写中的对应原文，没有则为空。tag 在遗漏重要信息、理解不到位、理解偏了、杜撰信息、强加信息、语气被误解、重点被误解中选；无问题时为 null。clarification 是可能有争议时的一句澄清问题，无则为 null。返回 json 对象 {"items":[{"id":"...","complete":true,"accurate":true,"listenerQuote":"...","tag":null,"clarification":null}]}。\n${JSON.stringify({ points, listenerTranscript: transcript })}`;
+    return normalizeComparison(points, await this.jsonAnswer(prompt)).map(item =>
+      item.listenerQuote && !transcript.includes(item.listenerQuote) ? { ...item, listenerQuote: '' } : item);
   }
 
   async extract(transcript: string): Promise<z.infer<typeof extractedPoints>['points']> {

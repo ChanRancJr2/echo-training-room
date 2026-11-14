@@ -5,6 +5,7 @@ import { readConfig } from './config.ts';
 import { TextCipher } from './crypto.ts';
 import { PgComparisonStore } from './comparisons.ts';
 import { PgRoomStore } from './rooms.ts';
+import { PgDeletionStore } from './deletions.ts';
 import { S3AudioStorage } from './audio-storage.ts';
 import { toMp3 } from './transcode.ts';
 import { VolcAiProvider, type ComparedPoint } from './ai-provider.ts';
@@ -17,6 +18,7 @@ const pool = new pg.Pool({ connectionString: config.DATABASE_URL, max: 10 });
 const cipher = new TextCipher(config.ENCRYPTION_MASTER_KEY);
 const comparisons = new PgComparisonStore(pool, cipher);
 const rooms = new PgRoomStore(pool);
+const deletions = new PgDeletionStore(pool);
 const storage = new S3AudioStorage({ endpoint: config.S3_ENDPOINT, publicEndpoint: config.S3_PUBLIC_ENDPOINT, region: config.S3_REGION, bucket: config.S3_BUCKET,
   accessKey: config.S3_ACCESS_KEY, secretKey: config.S3_SECRET_KEY });
 const provider = config.AI_MODE === 'real' ? new VolcAiProvider({ speechKey: config.SPEECH_API_KEY,
@@ -83,6 +85,7 @@ const scan = async () => {
 };
 await scan();
 const scanner = setInterval(() => { void scan().catch(error => process.stderr.write(`comparison scan failed: ${error.name}\n`)); }, 2000);
-const close = async () => { clearInterval(scanner); await worker.close(); await queue.close(); await Promise.all([producerRedis.quit(), workerRedis.quit(), pool.end()]); };
+const purger = setInterval(() => { void deletions.purgeAudio(key => storage.remove(key)).catch(() => process.stderr.write('audio purge failed\n')); }, 30_000);
+const close = async () => { clearInterval(scanner); clearInterval(purger); await worker.close(); await queue.close(); await Promise.all([producerRedis.quit(), workerRedis.quit(), pool.end()]); };
 process.once('SIGTERM', () => { void close().then(() => process.exit(0)); });
 process.once('SIGINT', () => { void close().then(() => process.exit(0)); });

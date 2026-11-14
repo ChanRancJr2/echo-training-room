@@ -36,7 +36,10 @@ try {
   const api = launch(['--experimental-strip-types', 'apps/api/src/main.ts']);
   const comparisonWorker = launch(['--experimental-strip-types', 'apps/api/src/worker.ts']);
   await waitFor('http://127.0.0.1:3100/health/ready', api);
-  try { await run(process.execPath, ['tests/room.browser.mjs']); }
+  try {
+    await run(process.execPath, ['tests/room.browser.mjs']);
+    await run(process.execPath, ['tests/modes.browser.mjs']);
+  }
   catch (error) { process.stderr.write(`API exit=${api.exitCode} signal=${api.signalCode}: ${api.recentOutput()}\nWORKER exit=${comparisonWorker.exitCode} signal=${comparisonWorker.signalCode}: ${comparisonWorker.recentOutput()}\n`); throw error; }
 } finally {
   for (const child of children) child.kill();

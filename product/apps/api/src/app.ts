@@ -10,6 +10,7 @@ import type { PgUploadStore } from './uploads.ts';
 import type { PgPointStore } from './points.ts';
 import type { PgComparisonStore } from './comparisons.ts';
 import type { PgReviewStore } from './reviews.ts';
+import type { PgDeletionStore } from './deletions.ts';
 
 const sessionBody = z.object({ nickname: z.string().trim().max(20).optional() }).strict();
 
@@ -21,6 +22,7 @@ export interface AppDependencies {
   points?: PgPointStore | undefined;
   comparisons?: PgComparisonStore | undefined;
   reviews?: PgReviewStore | undefined;
+  deletions?: PgDeletionStore | undefined;
   ready: () => Promise<boolean>;
   publicOrigin: string;
   production: boolean;
@@ -54,6 +56,8 @@ export async function createApp(deps: AppDependencies) {
   });
 
   app.post('/api/sessions/anonymous', { config: { rateLimit: { max: 12, timeWindow: '1 minute' } } }, async (request, reply) => {
+    const current = await findSession(deps.sessions, request.headers.cookie, currentTime());
+    if (current && await deps.rooms?.childHandoff(current.id)) return reply.code(403).send({ error: 'GUARDIAN_REQUIRED' });
     const parsed = sessionBody.safeParse(request.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: 'INVALID_INPUT' });
     const { session, token } = await createAnonymousSession(deps.sessions, parsed.data.nickname ?? '访客', currentTime());
@@ -64,13 +68,16 @@ export async function createApp(deps: AppDependencies) {
   app.get('/api/me', async (request, reply) => {
     const session = await findSession(deps.sessions, request.headers.cookie, currentTime());
     if (!session) return reply.code(401).send({ error: 'UNAUTHENTICATED' });
-    return { id: session.id, nickname: session.nickname, expiresAt: session.expiresAt.toISOString() };
+    const handoff = await deps.rooms?.childHandoff(session.id);
+    reply.header('Cache-Control', 'no-store');
+    return { id: session.id, nickname: session.nickname, expiresAt: session.expiresAt.toISOString(), ...(handoff ? { handoffRoomId: handoff.roomId } : {}) };
   });
 
   app.post('/api/sessions/logout', async (request, reply) => {
     const token = parseSessionCookie(request.headers.cookie);
     if (token) {
       const session = await findSession(deps.sessions, request.headers.cookie, currentTime());
+      if (session && await deps.rooms?.childHandoff(session.id)) return reply.code(403).send({ error: 'GUARDIAN_REQUIRED' });
       if (session && deps.rooms) await deps.rooms.leaveAll(session.id);
       await deps.sessions.revoke(hashToken(token));
     }
@@ -78,7 +85,7 @@ export async function createApp(deps: AppDependencies) {
     return { status: 'ok' };
   });
 
-  if (deps.rooms) registerRoomRoutes(app, deps.rooms, deps.sessions, currentTime, deps.rounds, deps.uploads, deps.points, deps.comparisons, deps.reviews);
+  if (deps.rooms) registerRoomRoutes(app, deps.rooms, deps.sessions, currentTime, deps.rounds, deps.uploads, deps.points, deps.comparisons, deps.reviews, deps.deletions);
 
   return app;
 }

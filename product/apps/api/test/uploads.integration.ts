@@ -72,7 +72,7 @@ test('speaker and listener uploads are verified, role-bound and idempotent acros
     assert.deepEqual(commits.map(r => r.statusCode), [200, 200]);
     assert.equal(commits[0].json().audioId, commits[1].json().audioId);
     assert.equal(commits[0].json().round.stage, 'KEYPOINT_CONFIRM');
-    assert.equal((await b.inject({ method: 'GET', url: `/api/rounds/${roundId}/audio/${asset.audioId}/access`, headers: { cookie: guestCookie } })).statusCode, 200);
+    assert.equal((await b.inject({ method: 'GET', url: `/api/rounds/${roundId}/audio/${asset.audioId}/access`, headers: { cookie: guestCookie } })).statusCode, 403);
     assert.equal((await b.inject({ method: 'GET', url: `/api/rounds/${roundId}/audio/${asset.audioId}/access` })).statusCode, 401);
     assert.equal((await pool.query(`SELECT count(*)::int AS n FROM audio_assets WHERE round_id = $1 AND kind = 'speaker' AND state = 'COMMITTED'`, [roundId])).rows[0].n, 1);
     await post(a, commitUrl, hostCookie, { expectedVersion: 3, transcribe: false });
@@ -83,6 +83,7 @@ test('speaker and listener uploads are verified, role-bound and idempotent acros
     assert.equal(confirmed.statusCode, 200);
     assert.equal(confirmed.json().round.stage, 'LISTENER_RETELL');
     assert.equal((await a.inject({ method: 'GET', url: `/api/rounds/${roundId}/points`, headers: { cookie: hostCookie } })).json()[0].text, '午饭要看外婆身体情况');
+    assert.equal((await b.inject({ method: 'GET', url: `/api/rounds/${roundId}/audio/${asset.audioId}/access`, headers: { cookie: guestCookie } })).statusCode, 200);
     const sealed = (await pool.query('SELECT content_ciphertext FROM key_points WHERE round_id = $1', [roundId])).rows[0].content_ciphertext as Buffer;
     assert.equal(sealed.includes(Buffer.from('午饭要看外婆身体情况')), false);
     const listenerPending = (await post(b, `/api/rounds/${roundId}/uploads`, guestCookie, { kind: 'listener', mimeType: 'audio/webm', byteSize: 100, idempotencyKey: crypto.randomUUID() })).json();
@@ -142,7 +143,13 @@ test('speaker and listener uploads are verified, role-bound and idempotent acros
     assert.equal(archivedReport.statusCode, 200);
     assert.equal(archivedReport.json().issues[0].listenerConfirmed, true);
     assert.equal((await post(b, `/api/rounds/${roundId}/uploads`, guestCookie, { kind: 'listener', mimeType: 'audio/webm', byteSize: 1024, idempotencyKey: crypto.randomUUID() })).statusCode, 409);
-    await post(a, `/api/rooms/${id}/leave`, hostCookie, {});
-    assert.equal((await b.inject({ method: 'GET', url: `/api/rounds/${roundId}/audio/${asset.audioId}/access`, headers: { cookie: guestCookie } })).statusCode, 403);
+    const swapped = await post(a, `/api/rooms/${id}/swap-seats`, hostCookie, { expectedVersion: archives[0]!.json().version });
+    assert.equal(swapped.statusCode, 200);
+    assert.equal(swapped.json().you.role, 'listener');
+    assert.equal(swapped.json().members.find((m: { role: string }) => m.role === 'speaker').id, started.members.find((m: { role: string }) => m.role === 'listener').id);
+    assert.equal((await post(b, `/api/rooms/${id}/swap-seats`, guestCookie, { expectedVersion: archives[0]!.json().version })).json().error, 'STALE_VERSION');
+    await post(b, `/api/rooms/${id}/leave`, guestCookie, {});
+    assert.equal((await b.inject({ method: 'GET', url: `/api/rounds/${roundId}/audio/${asset.audioId}/access`, headers: { cookie: guestCookie } })).statusCode, 200);
+    assert.equal((await b.inject({ method: 'GET', url: `/api/rounds/${roundId}/comparison`, headers: { cookie: guestCookie } })).statusCode, 200);
   } finally { await Promise.all([a.close(), b.close()]); await pool.end(); }
 });

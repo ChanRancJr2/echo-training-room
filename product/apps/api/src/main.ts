@@ -13,6 +13,7 @@ import { TextCipher } from './crypto.ts';
 import { PgPointStore } from './points.ts';
 import { PgComparisonStore } from './comparisons.ts';
 import { PgReviewStore } from './reviews.ts';
+import { PgDeletionStore } from './deletions.ts';
 
 try { process.loadEnvFile('.env'); } catch (error) {
   if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
@@ -28,11 +29,12 @@ await redis.connect();
 const app = await createApp({
   sessions: new PgSessionStore(pool),
   rooms,
-  rounds: new PgRoundStore(pool),
+  rounds: new PgRoundStore(pool, cipher ?? undefined),
   uploads: config.S3_ACCESS_KEY && config.S3_SECRET_KEY ? new PgUploadStore(pool, new S3AudioStorage({ endpoint: config.S3_ENDPOINT, publicEndpoint: config.S3_PUBLIC_ENDPOINT, region: config.S3_REGION, bucket: config.S3_BUCKET, accessKey: config.S3_ACCESS_KEY, secretKey: config.S3_SECRET_KEY })) : undefined,
   points: cipher ? new PgPointStore(pool, cipher) : undefined,
   comparisons: cipher ? new PgComparisonStore(pool, cipher) : undefined,
   reviews: new PgReviewStore(pool, cipher ?? undefined),
+  deletions: new PgDeletionStore(pool),
   publicOrigin: config.PUBLIC_ORIGIN,
   production: config.NODE_ENV === 'production',
   trustedProxy: process.env.TRUSTED_PROXY,

@@ -42,9 +42,6 @@ try {
   }
   const task = await post(`${round}/task`, host, { expectedVersion: started.roundVersion });
   const speaker = await upload(host, 'speaker', task.version, true);
-  const source = await get(`${round}/audio/${speaker.audioId}/access`, guest);
-  const playback = await fetch(source.url, { headers: { Range: 'bytes=0-1023' }, signal: AbortSignal.timeout(12000) });
-  assert.ok(playback.ok, `audio playback HTTP ${playback.status}`);
   let transcript;
   for (let i = 0; i < 35; i++) {
     transcript = await get(`${round}/speaker-transcript`, host);
@@ -54,7 +51,6 @@ try {
   assert.equal(transcript?.status, 'ready', 'real speaker transcription completed');
   assert.match(transcript.text, /外婆/);
   if (process.env.ECHO_EXPECT_CANDIDATES === '1') assert.ok(transcript.candidates?.length > 0, 'Ark extracted candidate points');
-  console.log('Real speaker ASR and audio playback passed');
   const points = await post(`${round}/points/confirm`, host, { expectedVersion: speaker.round.version, points: [
     { category: '事件', text: '周六先去看望外婆' },
     { category: '需求', text: '周日必须去机场接同学' },
@@ -65,6 +61,10 @@ try {
     readyToRetell = await post(`${round}/open-message`, guest, { expectedVersion: readyToRetell.version });
     assert.equal(readyToRetell.stage, 'LISTENER_RETELL');
   }
+  const source = await get(`${round}/audio/${speaker.audioId}/access`, guest);
+  const playback = await fetch(source.url, { headers: { Range: 'bytes=0-1023' }, signal: AbortSignal.timeout(12000) });
+  assert.ok(playback.ok, `audio playback HTTP ${playback.status}`);
+  console.log('Real speaker ASR and audio playback passed');
   const listening = await post(`${round}/restart-recording`, guest, { expectedVersion: readyToRetell.version, kind: 'listener' });
   await upload(guest, 'listener', listening.version);
   let state;
